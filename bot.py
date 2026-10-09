@@ -2,10 +2,12 @@ import asyncio
 import ipaddress
 import itertools
 import json
+import logging
 import os
 import re
 import time
 from datetime import date, datetime, timedelta, timezone
+from datetime import time as dtime
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
@@ -18,6 +20,8 @@ from aiogram.types import (
 )
 from dateparser.search import search_dates
 
+logging.basicConfig(level=logging.INFO)
+
 # Всё секретное берётся из переменных окружения, а не из кода
 TOKEN = os.getenv("BOT_TOKEN")
 GROQ_KEY = os.getenv("GROQ_API_KEY")  # бесплатный ключ с console.groq.com
@@ -25,12 +29,15 @@ GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 DAILY_AI_LIMIT = int(os.getenv("DAILY_AI_LIMIT", "10"))
 DEFAULT_TZ = "Europe/Moscow"
 
-# Варианты напоминаний: минуты до события -> подпись / «через сколько»
+# Напоминания: минуты до события -> подпись / «через сколько»
 LABELS = {0: "в момент", 10: "за 10 мин", 30: "за 30 мин",
           60: "за 1 час", 180: "за 3 часа", 1440: "за 1 день"}
 LEFT = {10: "10 минут", 30: "30 минут", 60: "1 час", 180: "3 часа", 1440: "1 день"}
-DEFAULT_OFFSETS = [60, 0]   # по умолчанию: за 1 час и в момент события
-MAX_NAGS = 8                # максимум повторов в режиме «каждый час»
+DEFAULT_OFFSETS = [60, 0]          # по умолчанию: за 1 час и в момент
+REPEAT_PRESETS = [5, 10, 15, 30, 60, 120]   # повтор, минуты
+MAX_NAGS = 12                      # максимум повторов
+MAX_SECTIONS = 15                  # разделов на человека (отдельно для задач и мероприятий)
+WD = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 
 # Кнопки главного меню (внизу экрана)
 B_ADD = "➕ Добавить"
@@ -45,7 +52,6 @@ MAIN_KB = ReplyKeyboardMarkup(
     resize_keyboard=True, is_persistent=True,
 )
 
-# Популярные часовые пояса для кнопок
 PRESETS = [
     ("🇷🇺 Москва +3", "Europe/Moscow"), ("🇺🇦 Киев", "Europe/Kyiv"),
     ("🇧🇾 Минск +3", "Europe/Minsk"), ("🇷🇺 Калининград +2", "Europe/Kaliningrad"),
@@ -54,36 +60,72 @@ PRESETS = [
     ("🇷🇺 Новосибирск +7", "Asia/Novosibirsk"), ("🇷🇺 Иркутск +8", "Asia/Irkutsk"),
     ("🇷🇺 Якутск +9", "Asia/Yakutsk"), ("🇷🇺 Владивосток +10", "Asia/Vladivostok"),
 ]
-# Города, которые можно написать текстом
 CITIES = {
     "москва": "Europe/Moscow", "санкт-петербург": "Europe/Moscow", "спб": "Europe/Moscow",
     "питер": "Europe/Moscow", "казань": "Europe/Moscow", "нижний новгород": "Europe/Moscow",
     "краснодар": "Europe/Moscow", "воронеж": "Europe/Moscow", "ростов-на-дону": "Europe/Moscow",
-    "киев": "Europe/Kyiv", "киiв": "Europe/Kyiv", "минск": "Europe/Minsk",
-    "калининград": "Europe/Kaliningrad", "самара": "Europe/Samara",
-    "екатеринбург": "Asia/Yekaterinburg", "уфа": "Asia/Yekaterinburg",
-    "челябинск": "Asia/Yekaterinburg", "пермь": "Asia/Yekaterinburg",
-    "омск": "Asia/Omsk", "новосибирск": "Asia/Novosibirsk", "красноярск": "Asia/Krasnoyarsk",
-    "иркутск": "Asia/Irkutsk", "якутск": "Asia/Yakutsk", "владивосток": "Asia/Vladivostok",
-    "хабаровск": "Asia/Vladivostok", "алматы": "Asia/Almaty", "астана": "Asia/Almaty",
-    "ташкент": "Asia/Tashkent", "баку": "Asia/Baku", "тбилиси": "Asia/Tbilisi",
-    "ереван": "Asia/Yerevan", "кишинев": "Europe/Chisinau", "вильнюс": "Europe/Vilnius",
-    "рига": "Europe/Riga", "таллин": "Europe/Tallinn", "варшава": "Europe/Warsaw",
-    "берлин": "Europe/Berlin", "лондон": "Europe/London", "стамбул": "Europe/Istanbul",
-    "дубай": "Asia/Dubai", "нью-йорк": "America/New_York",
+    "киев": "Europe/Kyiv", "минск": "Europe/Minsk", "калининград": "Europe/Kaliningrad",
+    "самара": "Europe/Samara", "екатеринбург": "Asia/Yekaterinburg", "уфа": "Asia/Yekaterinburg",
+    "челябинск": "Asia/Yekaterinburg", "пермь": "Asia/Yekaterinburg", "омск": "Asia/Omsk",
+    "новосибирск": "Asia/Novosibirsk", "красноярск": "Asia/Krasnoyarsk", "иркутск": "Asia/Irkutsk",
+    "якутск": "Asia/Yakutsk", "владивосток": "Asia/Vladivostok", "хабаровск": "Asia/Vladivostok",
+    "алматы": "Asia/Almaty", "астана": "Asia/Almaty", "ташкент": "Asia/Tashkent",
+    "баку": "Asia/Baku", "тбилиси": "Asia/Tbilisi", "ереван": "Asia/Yerevan",
+    "кишинев": "Europe/Chisinau", "вильнюс": "Europe/Vilnius", "рига": "Europe/Riga",
+    "таллин": "Europe/Tallinn", "варшава": "Europe/Warsaw", "берлин": "Europe/Berlin",
+    "лондон": "Europe/London", "стамбул": "Europe/Istanbul", "дубай": "Asia/Dubai",
+    "нью-йорк": "America/New_York",
 }
 
 # Пока без базы: всё в памяти, при перезапуске пропадает
-ITEMS = []      # задачи и события
-USER_TZ = {}    # user_id -> часовой пояс
-USER_SET = {}   # user_id -> {"offsets": [...], "repeat": bool}
-AI_USED = {}    # user_id -> (дата, сколько запросов к ИИ)
-AWAIT_TZ = set()  # кто сейчас вводит пояс вручную
-MODE = {}       # user_id -> "event" | "task" | "ai" (что добавляем следующим сообщением)
-_ids = itertools.count(1)
+ITEMS = []       # дела: kind = "task" | "event"
+SECTIONS = []    # разделы: {id, user_id, kind, name}
+DRAFTS = {}      # черновики, ждущие выбора «задача / мероприятие»
+STATE = {}       # user_id -> что бот ждёт от человека следующим сообщением
+USER_TZ = {}
+USER_SET = {}    # {"offsets": [...], "repeat": минуты}
+AI_USED = {}
+_ids, _sids, _dids = itertools.count(1), itertools.count(1), itertools.count(1)
 URL_RE = re.compile(r"https?://\S+")
 
 dp = Dispatcher()
+
+
+# ---------- мелкие помощники ----------
+
+def btn(text, data):
+    return InlineKeyboardButton(text=text, callback_data=data)
+
+
+def markup(rows):
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def chunk(items, n):
+    return [items[i:i + n] for i in range(0, len(items), n)]
+
+
+def fmt_min(n):
+    return f"{n // 60} ч" if n >= 60 and n % 60 == 0 else f"{n} мин"
+
+
+def get_tz(uid):
+    return USER_TZ.get(uid, DEFAULT_TZ)
+
+
+def get_set(uid):
+    return USER_SET.setdefault(uid, {"offsets": list(DEFAULT_OFFSETS), "repeat": 0})
+
+
+def ai_allowed(uid):
+    today = date.today()
+    d, n = AI_USED.get(uid, (today, 0))
+    if d != today:
+        n = 0
+    if n >= DAILY_AI_LIMIT:
+        return False
+    AI_USED[uid] = (today, n + 1)
+    return True
 
 
 # ---------- часовые пояса ----------
@@ -108,7 +150,7 @@ def offset_name(minutes):
 
 
 def parse_tz_input(text):
-    """Понимает: «Москва», «+3», «UTC+5:30», «15:30» (твоё текущее время), «Europe/Kyiv»."""
+    """Понимает: «Москва», «+3», «UTC+5:30», «15:30» (твоё время сейчас), «Europe/Kyiv»."""
     raw = text.strip()
     t = raw.lower().replace("ё", "е")
     m = re.fullmatch(r"(?:utc|gmt)?\s*([+-])\s*(\d{1,2})(?::?(\d{2}))?", t)
@@ -146,50 +188,189 @@ TZ_PROMPT = (
 
 
 def tz_kb():
-    btns = [InlineKeyboardButton(text=label, callback_data=f"tz:{name}") for label, name in PRESETS]
-    rows = [btns[i:i + 2] for i in range(0, len(btns), 2)]
-    rows.append([InlineKeyboardButton(text="✍️ Ввести вручную", callback_data="tz:manual")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    rows = chunk([btn(label, f"tz:{name}") for label, name in PRESETS], 2)
+    rows.append([btn("✍️ Ввести вручную", "tz:manual")])
+    return markup(rows)
 
 
-# ---------- вспомогательное ----------
+# ---------- время: разбор текста ----------
 
-def get_tz(uid):
-    return USER_TZ.get(uid, DEFAULT_TZ)
+def parse_local(text, tz):
+    """Естественный язык через dateparser: «завтра в 18:00», «в пятницу». Возвращает (название, ts)."""
+    z = zone(tz)
+    now = datetime.now(z)
+    found = search_dates(
+        text, languages=["ru"],
+        settings={"PREFER_DATES_FROM": "future", "RELATIVE_BASE": now.replace(tzinfo=None)},
+    )
+    if not found:
+        return None
+    fragment, dt = found[0]
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=z)
+    if not re.search(r"\d|через|час|минут|секунд|утр|вечер|дн[её]м|ночь|полдень|полночь", fragment.lower()):
+        dt = dt.replace(hour=9, minute=0, second=0, microsecond=0)
+        if dt <= now:
+            dt = now + timedelta(hours=1)
+    title = text.replace(fragment, "").strip(" ,.-—:") or text
+    return title, int(dt.timestamp())
 
 
-def get_set(uid):
-    return USER_SET.setdefault(uid, {"offsets": list(DEFAULT_OFFSETS), "repeat": False})
+def safe_local(text, tz):
+    try:
+        return parse_local(text, tz)
+    except Exception:
+        return None
 
 
-def ai_allowed(uid):
-    """Лимит запросов к ИИ на человека в день (чтобы не кончилась бесплатная квота)."""
-    today = date.today()
-    d, n = AI_USED.get(uid, (today, 0))
-    if d != today:
-        n = 0
-    if n >= DAILY_AI_LIMIT:
-        return False
-    AI_USED[uid] = (today, n + 1)
-    return True
+def parse_when(text, tz):
+    """Свой разбор для ввода руками: «18:30», «завтра 9:00», «25.10 14:00», «через 40 минут»."""
+    z = zone(tz)
+    now = datetime.now(z)
+    today = now.date()
+    t = text.lower().strip()
+
+    m = re.search(r"через\s+(\d+)\s*(мин\w*|м\b|час\w*|ч\b|дн\w*|д\b)", t)
+    if m:
+        n, u = int(m.group(1)), m.group(2)
+        if u.startswith("м"):
+            delta = timedelta(minutes=n)
+        elif u.startswith(("час", "ч")):
+            delta = timedelta(hours=n)
+        else:
+            delta = timedelta(days=n)
+        return int((now + delta).timestamp())
+
+    hh = mm = None
+    m = re.search(r"\b(\d{1,2}):(\d{2})\b", t)
+    if m:
+        hh, mm = int(m.group(1)), int(m.group(2))
+        t = t.replace(m.group(0), " ")
+    else:
+        m = re.search(r"\bв\s*(\d{1,2})\b(?![.:\d])", t)
+        if m:
+            hh, mm = int(m.group(1)), 0
+            t = t.replace(m.group(0), " ")
+    if hh is not None and (hh > 23 or mm > 59):
+        return None
+
+    day = None
+    if "послезавтра" in t:
+        day = today + timedelta(days=2)
+    elif "завтра" in t:
+        day = today + timedelta(days=1)
+    elif "сегодня" in t:
+        day = today
+    else:
+        m = re.search(r"\b(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?\b", t)
+        if m:
+            d_, mo = int(m.group(1)), int(m.group(2))
+            y = int(m.group(3)) if m.group(3) else today.year
+            if y < 100:
+                y += 2000
+            try:
+                day = date(y, mo, d_)
+            except ValueError:
+                return None
+            if not m.group(3) and day < today:
+                day = date(y + 1, mo, d_)
+
+    if hh is None and day is None:
+        return None
+    if hh is None:
+        hh, mm = 9, 0
+    if day is None:
+        day = today
+        if datetime.combine(day, dtime(hh, mm), tzinfo=z) <= now:
+            day = today + timedelta(days=1)
+    return int(datetime.combine(day, dtime(hh, mm), tzinfo=z).timestamp())
+
+
+def ymd(d):
+    return d.strftime("%Y%m%d")
+
+
+def parse_day(s):
+    return datetime.strptime(s, "%Y%m%d").date()
 
 
 def fmt_time(ts, tz):
-    return datetime.fromtimestamp(ts, zone(tz)).strftime("%d.%m.%Y в %H:%M")
+    dt = datetime.fromtimestamp(ts, zone(tz))
+    return f"{WD[dt.weekday()]} {dt:%d.%m.%Y} в {dt:%H:%M}"
 
+
+# ---------- дела и разделы ----------
+
+def secs(uid, kind):
+    return [s for s in SECTIONS if s["user_id"] == uid and s["kind"] == kind]
+
+
+def get_sec(sid, uid):
+    return next((s for s in SECTIONS if s["id"] == sid and s["user_id"] == uid), None)
+
+
+def make_section(uid, kind, name):
+    name = " ".join(name.split())[:30]
+    if not name:
+        raise ValueError("Название не должно быть пустым.")
+    for s in secs(uid, kind):
+        if s["name"].casefold() == name.casefold():
+            return s
+    if len(secs(uid, kind)) >= MAX_SECTIONS:
+        raise ValueError(f"Можно создать не больше {MAX_SECTIONS} разделов. Удали ненужные.")
+    s = {"id": next(_sids), "user_id": uid, "kind": kind, "name": name}
+    SECTIONS.append(s)
+    return s
+
+
+def items_of(uid, kind=None, sid=None, done=False):
+    return [e for e in ITEMS if e["user_id"] == uid and e["done"] == done
+            and (kind is None or e["kind"] == kind) and (sid is None or e["sec"] == sid)]
+
+
+def find(eid, uid):
+    return next((e for e in ITEMS if e["id"] == eid and e["user_id"] == uid), None)
+
+
+def reset_fired(e):
+    """Уже прошедшие напоминания не шлём задним числом."""
+    now = int(time.time())
+    e["nags"] = 0
+    e["snooze"] = None
+    e["fired"] = {o for o in e["offsets"] if e["due"] and e["due"] - o * 60 <= now}
+
+
+def add_item(uid, kind, title, due=None, place=None, note=None, sec=0):
+    s = get_set(uid)
+    e = {"id": next(_ids), "user_id": uid, "kind": kind, "title": title, "due": due,
+         "place": place, "note": note, "sec": sec, "done": False,
+         "offsets": list(s["offsets"]), "repeat": s["repeat"],
+         "fired": set(), "nags": 0, "snooze": None}
+    reset_fired(e)
+    ITEMS.append(e)
+    return e
+
+
+# ---------- карточка и кнопки ----------
 
 def remind_text(e):
     parts = [LABELS[o] for o in sorted(e["offsets"], reverse=True)]
     s = ", ".join(parts) if parts else "без напоминаний"
     if e["repeat"]:
-        s += " + повтор каждый час, пока не «Готово»"
+        s += f"\n🔁 Повтор: каждые {fmt_min(e['repeat'])}, пока не «Готово»"
     return s
 
 
 def card(e, tz):
-    lines = [("📅 " if e["due"] else "📝 ") + e["title"]]
+    event = e["kind"] == "event"
+    lines = [("📅 " if event else "📝 ") + e["title"]]
+    s = next((x["name"] for x in SECTIONS if x["id"] == e["sec"]), None) if e["sec"] else None
+    if s:
+        lines.append("📂 Раздел: " + s)
     if e["due"]:
-        lines.append("🕐 " + fmt_time(e["due"], tz))
+        lines.append(("🕐 " if event else "⏰ Напомню: ") + fmt_time(e["due"], tz))
+    elif event:
+        lines.append("🕐 Время не задано. Нажми «Задать время»")
     if e["place"]:
         lines.append("📍 " + e["place"])
     if e["note"]:
@@ -204,111 +385,218 @@ def card(e, tz):
 def kb(e):
     eid = e["id"]
     if e["done"]:
-        return InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="↩️ Вернуть", callback_data=f"undo:{eid}"),
-            InlineKeyboardButton(text="🗑 Удалить", callback_data=f"del:{eid}"),
-        ]])
-    if e["due"]:
-        rows = [
-            [InlineKeyboardButton(text="✅ Готово", callback_data=f"done:{eid}"),
-             InlineKeyboardButton(text="⏰ +1 час", callback_data=f"snooze:{eid}")],
-            [InlineKeyboardButton(text="🔔 Напоминания", callback_data=f"cfg:{eid}:open"),
-             InlineKeyboardButton(text="🗑 Удалить", callback_data=f"del:{eid}")],
-        ]
+        return markup([[btn("↩️ Вернуть", f"undo:{eid}"), btn("🗑 Удалить", f"del:{eid}")]])
+    event = e["kind"] == "event"
+    if event:
+        label = "🕐 Изменить время" if e["due"] else "🕐 Задать время"
     else:
-        rows = [
-            [InlineKeyboardButton(text="✅ Готово", callback_data=f"done:{eid}"),
-             InlineKeyboardButton(text="🗑 Удалить", callback_data=f"del:{eid}")],
-            [InlineKeyboardButton(text="🌅 Утром", callback_data=f"when:{eid}:am"),
-             InlineKeyboardButton(text="🌆 Вечером", callback_data=f"when:{eid}:pm"),
-             InlineKeyboardButton(text="⏳ Через 3 ч", callback_data=f"when:{eid}:3h")],
-        ]
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+        label = "⏰ Изменить время" if e["due"] else "⏰ Напомнить"
+    row2 = [btn(label, f"tp:{eid}:back")]
+    if e["due"]:
+        row2.append(btn("🔔 Напоминания", f"cfg:{eid}:open"))
+    return markup([
+        [btn("✅ Готово", f"done:{eid}"), btn("🗑 Удалить", f"del:{eid}")],
+        row2,
+        [btn("📂 Раздел", f"mv:{eid}"), btn("🔄 Сменить тип", f"kind:{eid}")],
+    ])
 
+
+def kb_remind(e):
+    eid = e["id"]
+    return markup([[btn("✅ Готово", f"done:{eid}"),
+                    btn("⏰ +15 мин", f"snz:{eid}:15"),
+                    btn("⏰ +1 час", f"snz:{eid}:60")]])
+
+
+def item_response(e, tz, prefix=""):
+    """Мероприятие без времени сразу ведёт к выбору времени, остальное показывает карточкой."""
+    if e["kind"] == "event" and not e["due"] and not e["done"]:
+        return picker_days(e, tz, prefix)
+    head = prefix + "\n" if prefix else ""
+    return head + card(e, tz), kb(e)
+
+
+# ---------- выбор даты и времени кнопками ----------
+
+def picker_days(e, tz, prefix=""):
+    z = zone(tz)
+    today = datetime.now(z).date()
+    eid = e["id"]
+    rows = [
+        [btn("⏳ Через 15 мин", f"tp:{eid}:in:15"), btn("⏳ Через 1 час", f"tp:{eid}:in:60"),
+         btn("⏳ Через 3 ч", f"tp:{eid}:in:180")],
+        [btn("Сегодня", f"tp:{eid}:d:{ymd(today)}"),
+         btn("Завтра", f"tp:{eid}:d:{ymd(today + timedelta(days=1))}")],
+    ]
+    days = [today + timedelta(days=i) for i in range(2, 14)]
+    rows += chunk([btn(f"{WD[d.weekday()]} {d:%d.%m}", f"tp:{eid}:d:{ymd(d)}") for d in days], 4)
+    rows.append([btn("✍️ Написать дату и время", f"tp:{eid}:txt")])
+    rows.append([btn("◀️ Отмена", f"tp:{eid}:x")])
+    event = e["kind"] == "event"
+    ask = "Когда будет мероприятие?" if event else "Когда напомнить?"
+    head = prefix + "\n\n" if prefix else ""
+    text = (f"{head}{'📅' if event else '📝'} {e['title']}\n\n🗓 {ask}\n"
+            "Выбери день или быстрый вариант «через…». Время (часы и минуты) выберешь следующим шагом.")
+    return text, markup(rows)
+
+
+def picker_hours(e, tz, day):
+    now = datetime.now(zone(tz))
+    eid = e["id"]
+    start = 0
+    if day == now.date():
+        start = now.hour if now.minute < 55 else now.hour + 1
+    hours = list(range(start, 24))
+    rows = chunk([btn(f"{h:02d}:00", f"tp:{eid}:h:{ymd(day)}:{h:02d}") for h in hours], 4)
+    rows.append([btn("◀️ Другой день", f"tp:{eid}:back")])
+    if hours:
+        body = "Выбери час. Минуты выберешь следующим шагом."
+    else:
+        body = "Сегодня уже не успеть. Вернись и выбери другой день."
+    text = f"{e['title']}\n\n🗓 {WD[day.weekday()]} {day:%d.%m.%Y}\n🕐 Во сколько? {body}"
+    return text, markup(rows)
+
+
+def picker_minutes(e, tz, day, hour):
+    now = datetime.now(zone(tz))
+    eid = e["id"]
+    mins = list(range(0, 60, 5))
+    if day == now.date() and hour == now.hour:
+        mins = [x for x in mins if x > now.minute]
+    rows = chunk([btn(f"{hour:02d}:{x:02d}", f"tp:{eid}:ok:{ymd(day)}:{hour:02d}{x:02d}") for x in mins], 4)
+    rows.append([btn("◀️ Другой час", f"tp:{eid}:d:{ymd(day)}")])
+    text = (f"{e['title']}\n\n🗓 {WD[day.weekday()]} {day:%d.%m.%Y}, {hour:02d}:xx\n"
+            "Выбери точное время. Нужно другое, например 18:07? Вернись назад и нажми «Написать дату и время».")
+    return text, markup(rows)
+
+
+# ---------- меню напоминаний ----------
 
 def menu_kb(offsets, repeat, eid):
-    """Меню выбора напоминаний. eid=0 — настройки по умолчанию, иначе конкретное событие."""
-    btns = [
-        InlineKeyboardButton(
-            text=("✅ " if o in offsets else "▫️ ") + label,
-            callback_data=f"cfg:{eid}:t{o}",
-        )
-        for o, label in LABELS.items()
-    ]
-    rows = [btns[i:i + 2] for i in range(0, len(btns), 2)]
-    rows.append([InlineKeyboardButton(
-        text="🔁 Повтор каждый час: " + ("вкл" if repeat else "выкл"),
-        callback_data=f"cfg:{eid}:rep",
-    )])
-    rows.append([InlineKeyboardButton(text="👌 Закрыть", callback_data=f"cfg:{eid}:close")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    rows = chunk([btn(("✅ " if o in offsets else "▫️ ") + label, f"cfg:{eid}:t{o}")
+                  for o, label in LABELS.items()], 2)
+    rows.append([btn("🔁 Повторять, пока не нажмёшь «Готово»:", "noop")])
+    rep = [btn(("✅ " if repeat == 0 else "") + "Выкл", f"cfg:{eid}:r0")]
+    for n in REPEAT_PRESETS:
+        rep.append(btn(("✅ " if repeat == n else "") + fmt_min(n), f"cfg:{eid}:r{n}"))
+    custom = repeat > 0 and repeat not in REPEAT_PRESETS
+    rep.append(btn(f"✅ {fmt_min(repeat)} (изменить)" if custom else "✍️ Своё", f"cfg:{eid}:rx"))
+    rows += chunk(rep, 3)
+    rows.append([btn("👌 Закрыть", f"cfg:{eid}:close")])
+    return markup(rows)
 
 
-def build_list(uid, kind):
-    """Список дел с вкладками. Нажатие на дело открывает его карточку."""
-    z = zone(get_tz(uid))
-    mine = [e for e in ITEMS if e["user_id"] == uid]
-    if kind == "tasks":
-        items = [e for e in mine if not e["due"] and not e["done"]][:10]
-        head = "📝 Задачи"
-    elif kind == "done":
-        items = [e for e in mine if e["done"]][-10:]
-        head = "✅ Выполненные"
-    else:
-        kind = "events"
-        items = sorted((e for e in mine if e["due"] and not e["done"]), key=lambda e: e["due"])[:10]
-        head = "📅 События"
-    tabs = [("📅 События", "events"), ("📝 Задачи", "tasks"), ("✅ Готовые", "done")]
-    rows = [[InlineKeyboardButton(text=("▸ " if k == kind else "") + label, callback_data=f"lst:{k}")
-             for label, k in tabs]]
-    for e in items:
+SETTINGS_TEXT = (
+    "🔔 Напоминания по умолчанию\n\n"
+    "Отметь, когда присылать напоминание о делах со временем. Можно выбрать несколько вариантов.\n\n"
+    "🔁 Повтор: если включить, я буду напоминать снова и снова с выбранным интервалом, "
+    "пока ты не нажмёшь «Готово».\n\n"
+    "Для отдельного дела это можно поменять на его карточке кнопкой «🔔 Напоминания»."
+)
+
+
+# ---------- экраны «Мои дела» ----------
+
+KIND_NAME = {"task": "📝 Задачи", "event": "📅 Мероприятия"}
+
+
+def hub_view(uid):
+    t, ev, dn = len(items_of(uid, "task")), len(items_of(uid, "event")), len(items_of(uid, done=True))
+    text = (
+        "📋 Мои дела\n\n"
+        "📝 Задачи: дела без жёсткого времени (купить, сделать, не забыть).\n"
+        "📅 Мероприятия: события в точное время (встреча, поездка, концерт).\n\n"
+        "Внутри каждой группы можно создавать свои разделы, например «Работа», «Дом» или «Учёба».\n\n"
+        "Что открыть?"
+    )
+    return text, markup([
+        [btn(f"📝 Задачи ({t})", "sk:task")],
+        [btn(f"📅 Мероприятия ({ev})", "sk:event")],
+        [btn(f"✅ Выполненные ({dn})", "dn")],
+    ])
+
+
+def kind_view(uid, kind):
+    ss = secs(uid, kind)
+    rows = [[btn(f"📂 {s['name']} ({len(items_of(uid, kind, s['id']))})", f"sv:{kind}:{s['id']}")] for s in ss]
+    rows.append([btn(f"📋 Без раздела ({len(items_of(uid, kind, 0))})", f"sv:{kind}:0")])
+    rows.append([btn("➕ Новый раздел", f"sn:{kind}")])
+    rows.append([btn("◀️ Назад", "hub")])
+    intro = "Выбери раздел или создай свой." if ss else "Своих разделов пока нет. Нажми «➕ Новый раздел», чтобы создать первый, и назови его как хочешь."
+    return f"{KIND_NAME[kind]}\n\n{intro}", markup(rows)
+
+
+def section_view(uid, kind, sid, tz):
+    z = zone(tz)
+    s = get_sec(sid, uid) if sid else None
+    items = items_of(uid, kind, sid)
+    if kind == "event":
+        items.sort(key=lambda e: (e["due"] is None, e["due"] or 0))
+    rows = []
+    for e in items[:15]:
         when = datetime.fromtimestamp(e["due"], z).strftime("%d.%m %H:%M  ") if e["due"] else ""
-        rows.append([InlineKeyboardButton(text=(when + e["title"])[:60], callback_data=f"open:{e['id']}")])
-    if kind == "done" and items:
-        rows.append([InlineKeyboardButton(text="🧹 Очистить выполненные", callback_data="lst:clear")])
-    text = head + (":\nНажми на дело, чтобы открыть." if items else "\nПока пусто.")
-    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+        rows.append([btn((when + e["title"])[:60], f"open:{e['id']}")])
+    rows.append([btn("➕ Добавить сюда", f"sa:{kind}:{sid}")])
+    if s:
+        rows.append([btn("✏️ Переименовать", f"sren:{sid}"), btn("🗑 Удалить раздел", f"sdel:{sid}")])
+    rows.append([btn("◀️ Назад", f"sk:{kind}")])
+    name = s["name"] if s else "Без раздела"
+    if items:
+        more = f"\n(показаны первые 15 из {len(items)})" if len(items) > 15 else ""
+        body = "Нажми на дело, чтобы открыть его." + more
+    else:
+        body = "Здесь пока пусто. Нажми «➕ Добавить сюда» или просто отправь мне текст."
+    return f"{KIND_NAME[kind]} → {name}\n\n{body}", markup(rows)
 
 
-def reset_fired(e):
-    """Уже прошедшие напоминания не шлём задним числом."""
-    now = int(time.time())
-    e["nags"] = 0
-    e["fired"] = {o for o in e["offsets"] if e["due"] and e["due"] - o * 60 <= now}
+def done_view(uid):
+    items = items_of(uid, done=True)[-15:]
+    rows = [[btn(("📅 " if e["kind"] == "event" else "📝 ") + e["title"][:55], f"open:{e['id']}")] for e in items]
+    if items:
+        rows.append([btn("🧹 Очистить выполненные", "dnclr")])
+    rows.append([btn("◀️ Назад", "hub")])
+    body = "Нажми на дело, чтобы вернуть его в список или удалить." if items else "Выполненных дел пока нет."
+    return f"✅ Выполненные\n\n{body}", markup(rows)
 
 
-def add_item(uid, title, due=None, place=None, note=None):
-    s = get_set(uid)
-    e = {"id": next(_ids), "user_id": uid, "title": title, "due": due,
-         "place": place, "note": note, "done": False,
-         "offsets": list(s["offsets"]), "repeat": s["repeat"],
-         "fired": set(), "nags": 0}
-    reset_fired(e)
-    ITEMS.append(e)
-    return e
+def choose_section_view(uid, kind, intro, pick, new_cb, back=None):
+    rows = [[btn(f"📂 {s['name']}", f"{pick}:{s['id']}")] for s in secs(uid, kind)]
+    rows.append([btn("📋 Без раздела", f"{pick}:0")])
+    rows.append([btn("➕ Новый раздел", new_cb)])
+    if back:
+        rows.append([btn("◀️ Назад", back)])
+    return intro, markup(rows)
 
 
-def find(eid, uid):
-    return next((e for e in ITEMS if e["id"] == eid and e["user_id"] == uid), None)
+# ---------- служебные ----------
 
-
-async def safe_edit(msg, text, markup):
+async def safe_edit(msg, text, mk):
     try:
-        await msg.edit_text(text, reply_markup=markup)
+        await msg.edit_text(text, reply_markup=mk)
+    except Exception:
+        pass
+
+
+async def retire(bot, ref, text):
+    """Меняем старое сообщение с кнопками на короткую пометку."""
+    if not ref:
+        return
+    try:
+        await bot.edit_message_text(text=text, chat_id=ref[0], message_id=ref[1], reply_markup=None)
     except Exception:
         pass
 
 
 async def need_tz(m):
-    """Пока человек не выбрал пояс, просим выбрать. True = дальше не идём."""
     if m.from_user.id in USER_TZ:
         return False
+    STATE[m.from_user.id] = {"type": "tz"}
     await m.answer(TZ_PROMPT, reply_markup=tz_kb())
     return True
 
 
 async def guard(m):
-    MODE.pop(m.from_user.id, None)
+    STATE.pop(m.from_user.id, None)
     return await need_tz(m)
 
 
@@ -318,38 +606,25 @@ async def tz_done(message, uid):
     await message.answer(
         f"✅ Часовой пояс: {name}\nСейчас у тебя {now}. Если время неверное, "
         f"нажми «{B_TZ}» и выбери другой.\n\n"
-        "Теперь просто кинь мне текст, например: «Встреча с Олей завтра в 18:00»",
+        "Теперь можно добавлять дела: нажми «➕ Добавить» или просто отправь мне текст, "
+        "например «Встреча с Олей завтра в 18:00».",
         reply_markup=MAIN_KB,
     )
 
 
-# ---------- разбор без ИИ (бесплатно и быстро) ----------
-
-def parse_local(text, tz):
-    z = zone(tz)
-    now = datetime.now(z)
-    found = search_dates(
-        text, languages=["ru"],
-        settings={"PREFER_DATES_FROM": "future", "RELATIVE_BASE": now.replace(tzinfo=None)},
-    )
-    if not found:
-        return None
-    fragment, dt = found[0]
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=z)
-    # Если в тексте только день без времени («завтра», «в пятницу»), ставим 09:00
-    if not re.search(r"\d|через|час|минут|секунд|утр|вечер|дн[её]м|ночь|полдень|полночь", fragment.lower()):
-        dt = dt.replace(hour=9, minute=0, second=0, microsecond=0)
-        if dt <= now:
-            dt = now + timedelta(hours=1)
-    title = text.replace(fragment, "").strip(" ,.-—:") or text
-    return title, int(dt.timestamp())
+def add_prompt(kind, sid, uid):
+    s = get_sec(sid, uid) if sid else None
+    where = f" в раздел «{s['name']}»" if s else ""
+    if kind == "task":
+        return (f"📝 Напиши задачу{where}.\n\nНапример: «купить молоко» или «сдать отчёт завтра в 18:00». "
+                "Если назовёшь время, я поставлю напоминание. Если нет, задача просто сохранится.")
+    return (f"📅 Напиши мероприятие{where} и когда оно.\n\nНапример: «Встреча с Олей завтра в 18:00». "
+            "Если время не назовёшь, я предложу выбрать его кнопками.")
 
 
-# ---------- ссылки ----------
+# ---------- ссылки и ИИ ----------
 
 async def is_public(url):
-    """Не даём боту ходить на внутренние адреса."""
     try:
         host = urlparse(url).hostname
         infos = await asyncio.get_running_loop().getaddrinfo(host, None)
@@ -380,17 +655,14 @@ async def fetch_page(url):
     return re.sub(r"\s+", " ", text).strip()[:4000]
 
 
-# ---------- нейросеть (Groq, бесплатный тариф) ----------
-
 async def ask_llm(text, tz):
-    """Возвращает список {title, datetime, place, note} или None."""
     now = datetime.now(zone(tz)).strftime("%Y-%m-%d %H:%M, %A")
     system = (
         "Ты помощник-планировщик. Из текста пользователя выдели задачи и события. "
         f"Сейчас {now}, часовой пояс {tz}. Отвечай ТОЛЬКО JSON такого вида: "
         '{"items":[{"title":"коротко","datetime":"YYYY-MM-DDTHH:MM или null",'
         '"place":"строка или null","note":"строка или null"}]}. '
-        "Если времени у дела нет, datetime = null (это задача). "
+        "Если времени у дела нет, datetime = null. "
         "Если дата есть, а времени нет, ставь 09:00. Ничего не выдумывай."
     )
     payload = {
@@ -427,20 +699,54 @@ def to_ts(value, tz):
         return None
 
 
+# ---------- черновики: «Что это: задача или мероприятие?» ----------
+
+def new_draft(uid, title, due, place=None, note=None):
+    did = next(_dids)
+    DRAFTS[did] = {"uid": uid, "title": title, "due": due, "place": place, "note": note, "kind": None}
+    return did
+
+
+def draft_view(did, tz):
+    d = DRAFTS[did]
+    lines = ["🤔 Что это?", "", f"«{d['title']}»"]
+    if d["due"]:
+        lines.append("🕐 Нашёл время: " + fmt_time(d["due"], tz))
+    if d["place"]:
+        lines.append("📍 " + str(d["place"]))
+    lines += [
+        "",
+        "📝 Задача: дело, которое нужно сделать. Время необязательно, напомню, если назовёшь.",
+        "📅 Мероприятие: событие в точное время, например встреча, поездка, концерт.",
+        "",
+        "Выбери, как сохранить 👇",
+    ]
+    return "\n".join(lines), markup([
+        [btn("📝 Задача", f"dk:{did}:task"), btn("📅 Мероприятие", f"dk:{did}:event")],
+        [btn("✖️ Не сохранять", f"dx:{did}")],
+    ])
+
+
+def finalize_draft(did, sid):
+    d = DRAFTS.pop(did)
+    return add_item(d["uid"], d["kind"], d["title"], d["due"], d["place"], d["note"], sid)
+
+
 # ---------- команды и кнопки меню ----------
 
 @dp.message(CommandStart())
 async def start(m: Message):
-    MODE.pop(m.from_user.id, None)
+    STATE.pop(m.from_user.id, None)
     if m.from_user.id not in USER_TZ:
         await m.answer(
-            "Привет! 👋 Я превращаю любой текст, пересланное сообщение или ссылку "
-            "в задачу или событие и напоминаю о них вовремя.\n\n"
+            "Привет! 👋 Я помогаю не забывать дела. Отправь мне текст, пересланное сообщение "
+            "или ссылку, а я сделаю из этого задачу или мероприятие и напомню вовремя.\n\n"
             "Для начала скажи, какой у тебя часовой пояс, чтобы я не путал время.",
         )
-        await m.answer(TZ_PROMPT, reply_markup=tz_kb())
+        await need_tz(m)
         return
-    await m.answer("С возвращением! Выбирай в меню внизу или просто кидай текст.", reply_markup=MAIN_KB)
+    await m.answer("С возвращением! Выбирай действие в меню внизу или просто отправь мне текст.",
+                   reply_markup=MAIN_KB)
 
 
 @dp.message(Command("menu"))
@@ -453,15 +759,17 @@ async def menu(m: Message):
 @dp.message(Command("help"))
 @dp.message(F.text == B_HELP)
 async def help_cmd(m: Message):
-    MODE.pop(m.from_user.id, None)
+    STATE.pop(m.from_user.id, None)
     await m.answer(
-        "Как пользоваться:\n"
-        "• Просто кинь текст: «Встреча с Олей завтра в 18:00», «купить молоко», "
-        "пересланное сообщение или ссылку на мероприятие.\n"
-        "• Под каждой карточкой есть кнопки: выполнить, отложить, настроить напоминания.\n\n"
-        "Кнопки внизу:\n"
-        f"{B_ADD} — добавить дело\n{B_LIST} — события, задачи, выполненные\n"
-        f"{B_REM} — когда напоминать по умолчанию\n{B_TZ} — сменить пояс\n\n"
+        "❓ Как пользоваться\n\n"
+        "1️⃣ Отправь мне любой текст, например «Встреча с Олей завтра в 18:00», «купить молоко», "
+        "пересланное сообщение или ссылку на афишу.\n"
+        "2️⃣ Я спрошу, что это: 📝 задача или 📅 мероприятие, и при желании в какой раздел положить.\n"
+        "3️⃣ Если времени нет, выбери его кнопками: день, час, минуты.\n"
+        "4️⃣ Под каждым делом есть кнопки: выполнить, изменить время, настроить напоминания, "
+        "перенести в другой раздел.\n\n"
+        f"Кнопки внизу:\n{B_ADD}: добавить дело\n{B_LIST}: задачи, мероприятия и твои разделы\n"
+        f"{B_REM}: когда напоминать по умолчанию и как часто повторять\n{B_TZ}: сменить пояс\n\n"
         "Команды: /add /list /settings /tz /menu /help"
     )
 
@@ -472,11 +780,14 @@ async def add_menu(m: Message):
     if await guard(m):
         return
     await m.answer(
-        "Что добавим? Можно выбрать тип или просто кинуть текст, пересланное сообщение или ссылку.",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📅 Событие", callback_data="add:event"),
-             InlineKeyboardButton(text="📝 Задача", callback_data="add:task")],
-            [InlineKeyboardButton(text="🤖 Из текста или ссылки", callback_data="add:ai")],
+        "➕ Что добавляем?\n\n"
+        "📝 Задача: дело, которое нужно сделать (время по желанию).\n"
+        "📅 Мероприятие: событие в точное время (встреча, поездка, концерт).\n"
+        "🤖 Из текста или ссылки: пришли длинный текст или ссылку, я найду в них все дела.\n\n"
+        "Можно и без кнопок: просто отправь мне текст, и я спрошу, что это.",
+        reply_markup=markup([
+            [btn("📝 Задача", "add:task"), btn("📅 Мероприятие", "add:event")],
+            [btn("🤖 Из текста или ссылки", "add:ai")],
         ]),
     )
 
@@ -486,8 +797,8 @@ async def add_menu(m: Message):
 async def list_cmd(m: Message):
     if await guard(m):
         return
-    text, markup = build_list(m.from_user.id, "events")
-    await m.answer(text, reply_markup=markup)
+    text, mk = hub_view(m.from_user.id)
+    await m.answer(text, reply_markup=mk)
 
 
 @dp.message(Command("settings"))
@@ -496,30 +807,26 @@ async def settings(m: Message):
     if await guard(m):
         return
     s = get_set(m.from_user.id)
-    await m.answer(
-        "🔔 Напоминания по умолчанию\n"
-        "Отметь, когда присылать напоминание о новых событиях. "
-        "Для каждого события это можно поменять кнопкой «🔔 Напоминания» на его карточке.",
-        reply_markup=menu_kb(s["offsets"], s["repeat"], 0),
-    )
+    await m.answer(SETTINGS_TEXT, reply_markup=menu_kb(s["offsets"], s["repeat"], 0))
 
 
 @dp.message(Command("tz"))
 @dp.message(F.text == B_TZ)
 async def tz_cmd(m: Message):
     uid = m.from_user.id
-    MODE.pop(uid, None)
+    STATE.pop(uid, None)
     parts = (m.text or "").split(maxsplit=1)
     if len(parts) == 2 and parts[0].startswith("/"):
         name = parse_tz_input(parts[1])
         if name:
             USER_TZ[uid] = name
-            AWAIT_TZ.discard(uid)
             await tz_done(m, uid)
         else:
+            STATE[uid] = {"type": "tz"}
             await m.answer("Не понял такой пояс. Выбери кнопкой или напиши город, +3 или время.",
                            reply_markup=tz_kb())
         return
+    STATE[uid] = {"type": "tz"}
     if uid in USER_TZ:
         now = datetime.now(zone(get_tz(uid))).strftime("%H:%M")
         await m.answer(f"Сейчас: {get_tz(uid)} (у тебя {now}).\n\n{TZ_PROMPT}", reply_markup=tz_kb())
@@ -527,272 +834,563 @@ async def tz_cmd(m: Message):
         await m.answer(TZ_PROMPT, reply_markup=tz_kb())
 
 
-# ---------- главный обработчик текста ----------
+# ---------- текстовые сообщения ----------
 
 @dp.message(F.text)
 async def on_text(m: Message):
     uid = m.from_user.id
     text = m.text.strip()
+    st = STATE.get(uid)
 
-    # Пока нет часового пояса (или человек вводит его вручную), читаем текст как пояс
-    if uid not in USER_TZ or uid in AWAIT_TZ:
+    # Пока нет пояса (или человек его меняет), читаем текст как пояс
+    if uid not in USER_TZ or (st and st["type"] == "tz"):
         name = parse_tz_input(text)
         if name:
             USER_TZ[uid] = name
-            AWAIT_TZ.discard(uid)
+            STATE.pop(uid, None)
             await tz_done(m, uid)
         else:
+            STATE[uid] = {"type": "tz"}
             await m.answer("Не понял. Выбери пояс кнопкой или напиши город, «+3» "
                            "или сколько сейчас у тебя времени (например 15:30).",
                            reply_markup=tz_kb())
         return
 
     tz = get_tz(uid)
-    mode = MODE.pop(uid, None)
+    if st:
+        STATE.pop(uid, None)
+        t = st["type"]
 
-    # Режим «Задача»: сохраняем как есть, без разбора
-    if mode == "task":
-        e = add_item(uid, text[:200])
-        await m.answer("✅ Добавлено\n" + card(e, tz), reply_markup=kb(e))
-        return
-
-    url_match = URL_RE.search(text)
-    results = []  # (title, due, place, note)
-
-    # 1) короткий текст с датой: разбираем бесплатно, без ИИ
-    if mode != "ai" and not url_match and len(text) < 200:
-        loc = parse_local(text, tz)
-        if loc:
-            results.append((loc[0], loc[1], None, None))
-
-    # 2) сложное: ссылки, длинные тексты, непонятные даты -> нейросеть
-    if not results:
-        await m.bot.send_chat_action(m.chat.id, "typing")
-        source = text
-        if url_match:
-            page = await fetch_page(url_match.group(0))
-            if not page:
-                await m.answer("Не смог открыть ссылку. Скинь текст мероприятия сообщением.")
-                return
-            comment = text.replace(url_match.group(0), "").strip()
-            source = f"{comment}\nСсылка: {url_match.group(0)}\nСтраница: {page}"
-
-        items = None
-        if GROQ_KEY and ai_allowed(uid):
-            items = await ask_llm(source, tz)
-        elif GROQ_KEY:
-            await m.answer("Лимит разбора ИИ на сегодня закончился. Напиши коротко с датой, например «завтра в 18:00».")
+        if t == "add":  # «Добавить» -> тип и раздел уже выбраны
+            title, due = text, None
+            loc = safe_local(text, tz) if len(text) < 200 else None
+            if loc:
+                title, due = loc
+            e = add_item(uid, st["kind"], title[:200], due, sec=st["sec"])
+            resp, mk = item_response(e, tz, "✅ Добавлено")
+            await m.answer(resp, reply_markup=mk)
             return
 
-        if items:
-            for it in items[:10]:
-                if it.get("title"):
-                    results.append((str(it["title"]), to_ts(it.get("datetime"), tz),
-                                    it.get("place"), it.get("note")))
-        elif not url_match and len(text) < 200:
-            # ИИ недоступен: сохраняем как обычную задачу без времени
-            results.append((text, None, None, None))
+        if t == "ai":
+            await handle_free_text(m, text, force_ai=True)
+            return
 
-    if not results:
-        await m.answer("Не смог ничего выделить. Попробуй написать подробнее.")
+        if t == "sec_new":
+            try:
+                s = make_section(uid, st["kind"], text)
+            except ValueError as ex:
+                STATE[uid] = st
+                await m.answer(f"⚠️ {ex}\nНапиши другое название.")
+                return
+            await after_section_created(m, st, s)
+            return
+
+        if t == "sec_rename":
+            s = get_sec(st["sid"], uid)
+            name = " ".join(text.split())[:30]
+            if s and name:
+                s["name"] = name
+                resp, mk = section_view(uid, s["kind"], s["id"], tz)
+                await m.answer(f"✅ Раздел переименован в «{name}»\n\n" + resp, reply_markup=mk)
+            return
+
+        if t == "when":
+            e = find(st["eid"], uid)
+            if not e:
+                return
+            ts = parse_when(text, tz)
+            if ts is None:
+                loc = safe_local(text, tz)
+                ts = loc[1] if loc else None
+            if ts is None or ts <= time.time():
+                STATE[uid] = st
+                await m.answer(
+                    "⚠️ Не понял время или оно уже прошло. Напиши, например:\n"
+                    "• 18:30\n• завтра 9:00\n• 25.10 14:00\n• через 40 минут")
+                return
+            e["due"] = ts
+            reset_fired(e)
+            await m.answer("✅ Время поставлено\n" + card(e, tz), reply_markup=kb(e))
+            await retire(m.bot, st.get("msg"), "✅ Время выбрано")
+            return
+
+        if t == "repeat":
+            digits = re.sub(r"\D", "", text)
+            n = int(digits) if digits else 0
+            if not 1 <= n <= 1440:
+                STATE[uid] = st
+                await m.answer("⚠️ Напиши число минут от 1 до 1440, например 7.")
+                return
+            if st["eid"] == 0:
+                get_set(uid)["repeat"] = n
+                await m.answer(f"✅ Повтор по умолчанию: каждые {fmt_min(n)}, пока не нажмёшь «Готово».")
+            else:
+                e = find(st["eid"], uid)
+                if e:
+                    e["repeat"] = n
+                    await m.answer("✅ Повтор настроен\n" + card(e, tz), reply_markup=kb(e))
+            return
+
+    await handle_free_text(m, text)
+
+
+async def after_section_created(m, st, s):
+    uid = m.from_user.id
+    tz = get_tz(uid)
+    then = st.get("then")
+    if then == "draft":
+        d = DRAFTS.get(st["ref"])
+        if not d:
+            await m.answer(f"✅ Раздел «{s['name']}» создан, но черновик уже закрыт.")
+            return
+        e = finalize_draft(st["ref"], s["id"])
+        resp, mk = item_response(e, tz, f"✅ Сохранено в раздел «{s['name']}»")
+        await m.answer(resp, reply_markup=mk)
+        await retire(m.bot, st.get("msg"), "✅ Сохранено")
+    elif then == "move":
+        e = find(st["ref"], uid)
+        if e:
+            e["sec"] = s["id"]
+            await m.answer(f"✅ Раздел «{s['name']}» создан, дело перенесено\n" + card(e, tz), reply_markup=kb(e))
+    elif then == "add":
+        STATE[uid] = {"type": "add", "kind": st["kind"], "sec": s["id"]}
+        await m.answer(f"✅ Раздел «{s['name']}» создан.\n\n" + add_prompt(st["kind"], s["id"], uid))
+    else:
+        await m.answer(
+            f"✅ Раздел «{s['name']}» создан.",
+            reply_markup=markup([[btn("➕ Добавить сюда", f"sa:{s['kind']}:{s['id']}")],
+                                 [btn("📂 Открыть раздел", f"sv:{s['kind']}:{s['id']}")]]),
+        )
+
+
+async def handle_free_text(m, text, force_ai=False):
+    """Текст без выбранного типа: показываем, что поняли, и спрашиваем «задача или мероприятие»."""
+    uid = m.from_user.id
+    tz = get_tz(uid)
+    url_match = URL_RE.search(text)
+    use_ai = force_ai or url_match or len(text) >= 200
+
+    if not use_ai:
+        title, due = text, None
+        loc = safe_local(text, tz)
+        if loc:
+            title, due = loc
+        did = new_draft(uid, title[:200], due)
+        dtext, mk = draft_view(did, tz)
+        await m.answer(dtext, reply_markup=mk)
         return
 
-    for title, due, place, note in results:
-        e = add_item(uid, title, due, place, note)
-        await m.answer("✅ Добавлено\n" + card(e, tz), reply_markup=kb(e))
+    await m.bot.send_chat_action(m.chat.id, "typing")
+    source = text
+    if url_match:
+        page = await fetch_page(url_match.group(0))
+        if not page:
+            await m.answer("Не смог открыть ссылку. Скинь текст мероприятия сообщением, и я его разберу.")
+            return
+        comment = text.replace(url_match.group(0), "").strip()
+        source = f"{comment}\nСсылка: {url_match.group(0)}\nСтраница: {page}"
+
+    items = None
+    if GROQ_KEY:
+        if ai_allowed(uid):
+            items = await ask_llm(source, tz)
+        else:
+            await m.answer("Лимит разбора ИИ на сегодня закончился. Напиши коротко с датой, например «завтра в 18:00».")
+            return
+    elif url_match:
+        await m.answer("Разбор ссылок пока выключен. Скинь текст мероприятия сообщением.")
+        return
+
+    drafts = []
+    for it in (items or [])[:10]:
+        if it.get("title"):
+            drafts.append((str(it["title"])[:200], to_ts(it.get("datetime"), tz), it.get("place"), it.get("note")))
+    if not drafts:
+        title, due = text[:200], None
+        loc = safe_local(text, tz) if len(text) < 200 else None
+        if loc:
+            title, due = loc[0][:200], loc[1]
+        drafts = [(title, due, None, None)]
+
+    if len(drafts) == 1:
+        did = new_draft(uid, *drafts[0])
+        dtext, mk = draft_view(did, tz)
+        await m.answer(dtext, reply_markup=mk)
+        return
+
+    await m.answer(f"🤖 Нашёл дел: {len(drafts)}. Сохраняю все. Тип определил сам: "
+                   "со временем это мероприятие, без времени задача. Любое можно поменять кнопкой на карточке.")
+    for title, due, place, note in drafts:
+        e = add_item(uid, "event" if due else "task", title, due, place, note)
+        await m.answer("✅ Сохранено\n" + card(e, tz), reply_markup=kb(e))
 
 
 # ---------- инлайн-кнопки ----------
 
-@dp.callback_query(F.data.startswith("tz:"))
-async def on_tz(c: CallbackQuery):
-    uid = c.from_user.id
-    val = c.data[3:]
-    if val == "manual":
-        AWAIT_TZ.add(uid)
-        await c.message.answer("Напиши город (например, Москва), пояс (+3 или UTC+5) "
-                               "или сколько сейчас у тебя времени (например 15:30).")
-        await c.answer()
-        return
-    USER_TZ[uid] = val
-    AWAIT_TZ.discard(uid)
-    await c.answer("Готово")
-    await tz_done(c.message, uid)
-
-
-@dp.callback_query(F.data.startswith("add:"))
-async def on_add(c: CallbackQuery):
-    mode = c.data.split(":")[1]
-    MODE[c.from_user.id] = mode
-    prompts = {
-        "event": "📅 Напиши, что и когда. Например: «Встреча с Олей завтра в 18:00»",
-        "task": "📝 Напиши задачу. Например: «купить молоко»",
-        "ai": "🤖 Кинь длинный текст, пересланное сообщение или ссылку, я выделю всё нужное.",
-    }
-    await c.message.answer(prompts.get(mode, "Напиши текст."))
-    await c.answer()
-
-
-@dp.callback_query(F.data.startswith("lst:"))
-async def on_list(c: CallbackQuery):
-    uid = c.from_user.id
-    kind = c.data.split(":")[1]
-    if kind == "clear":
-        ITEMS[:] = [e for e in ITEMS if not (e["user_id"] == uid and e["done"])]
-        kind = "done"
-    text, markup = build_list(uid, kind)
-    await safe_edit(c.message, text, markup)
-    await c.answer()
-
-
-@dp.callback_query(F.data.startswith("open:"))
-async def on_open(c: CallbackQuery):
-    e = find(int(c.data.split(":")[1]), c.from_user.id)
-    if not e:
-        await c.answer("Не найдено")
-        return
-    await c.message.answer(card(e, get_tz(c.from_user.id)), reply_markup=kb(e))
-    await c.answer()
-
-
-@dp.callback_query(F.data.startswith("done:"))
-async def on_done(c: CallbackQuery):
-    e = find(int(c.data.split(":")[1]), c.from_user.id)
-    if e:
-        e["done"] = True
-        await safe_edit(c.message, "✅ Выполнено: " + e["title"], None)
-    await c.answer("Готово!")
-
-
-@dp.callback_query(F.data.startswith("undo:"))
-async def on_undo(c: CallbackQuery):
-    e = find(int(c.data.split(":")[1]), c.from_user.id)
-    if e:
-        e["done"] = False
-        reset_fired(e)
-        await safe_edit(c.message, card(e, get_tz(c.from_user.id)), kb(e))
-    await c.answer("Вернул в список")
-
-
-@dp.callback_query(F.data.startswith("del:"))
-async def on_del(c: CallbackQuery):
-    e = find(int(c.data.split(":")[1]), c.from_user.id)
-    if e:
-        ITEMS.remove(e)
-    await safe_edit(c.message, "🗑 Удалено", None)
-    await c.answer("Удалено")
-
-
-@dp.callback_query(F.data.startswith("snooze:"))
-async def on_snooze(c: CallbackQuery):
-    e = find(int(c.data.split(":")[1]), c.from_user.id)
-    if e:
-        e["due"] = int(time.time()) + 3600
-        reset_fired(e)
-        await safe_edit(c.message, card(e, get_tz(c.from_user.id)), kb(e))
-    await c.answer("Напомню через час")
-
-
-@dp.callback_query(F.data.startswith("when:"))
-async def on_when(c: CallbackQuery):
-    """Для задачи без времени: быстро выбрать, когда напомнить."""
-    _, eid, mode = c.data.split(":")
-    uid = c.from_user.id
-    e = find(int(eid), uid)
-    if not e:
-        await c.answer("Не найдено")
-        return
-    tzname = get_tz(uid)
-    now = datetime.now(zone(tzname))
-    if mode == "3h":
-        dt = now + timedelta(hours=3)
-    else:
-        hour = 9 if mode == "am" else 19
-        dt = now.replace(hour=hour, minute=0, second=0, microsecond=0)
-        if dt <= now + timedelta(minutes=1):
-            dt += timedelta(days=1)
-    e["due"] = int(dt.timestamp())
-    reset_fired(e)
-    await safe_edit(c.message, card(e, tzname), kb(e))
-    await c.answer("Поставил напоминание")
-
-
-@dp.callback_query(F.data.startswith("cfg:"))
-async def on_cfg(c: CallbackQuery):
-    _, eid, what = c.data.split(":")
-    eid, uid = int(eid), c.from_user.id
-    tzname = get_tz(uid)
-    e = None
-    if eid == 0:
-        target = get_set(uid)
-    else:
-        e = find(eid, uid)
-        if not e:
-            await c.answer("Не найдено")
-            return
-        target = e
-
-    if what == "close":
-        if e:
-            await safe_edit(c.message, card(e, tzname), kb(e))
-        else:
-            try:
-                await c.message.delete()
-            except Exception:
-                pass
-        await c.answer()
-        return
-
-    if what == "rep":
-        target["repeat"] = not target["repeat"]
-    elif what.startswith("t"):
-        o = int(what[1:])
-        if o in target["offsets"]:
-            target["offsets"].remove(o)
-        else:
-            target["offsets"].append(o)
-        target["offsets"].sort(reverse=True)
-    # what == "open" просто показывает меню
-
-    markup = menu_kb(target["offsets"], target["repeat"], eid)
-    if e:
-        now = int(time.time())
-        e["fired"] |= {o for o in e["offsets"] if e["due"] and e["due"] - o * 60 <= now}
-        await safe_edit(c.message, card(e, tzname), markup)
-    else:
+@dp.callback_query()
+async def on_cb(c: CallbackQuery):
+    try:
+        await dispatch(c)
+    except Exception:
+        logging.exception("callback error: %s", c.data)
         try:
-            await c.message.edit_reply_markup(reply_markup=markup)
+            await c.answer("Что-то пошло не так, попробуй ещё раз")
         except Exception:
             pass
+
+
+async def dispatch(c: CallbackQuery):
+    uid = c.from_user.id
+    p = c.data.split(":")
+    cmd = p[0]
+    msg = c.message
+    tz = get_tz(uid)
+
+    if cmd == "noop":
+        await c.answer()
+        return
+
+    # --- часовой пояс ---
+    if cmd == "tz":
+        if p[1] == "manual":
+            STATE[uid] = {"type": "tz"}
+            await msg.answer("Напиши город (например, Москва), пояс (+3 или UTC+5) "
+                             "или сколько сейчас у тебя времени (например 15:30).")
+            await c.answer()
+            return
+        USER_TZ[uid] = ":".join(p[1:])
+        STATE.pop(uid, None)
+        await c.answer("Готово")
+        await tz_done(msg, uid)
+        return
+
+    # --- «Добавить» ---
+    if cmd == "add":
+        kind = p[1]
+        if kind == "ai":
+            STATE[uid] = {"type": "ai"}
+            await msg.answer("🤖 Отправь длинный текст, пересланное сообщение или ссылку на мероприятие. "
+                             "Я сам найду в них дела, даты и места, а ты выберешь, как сохранить.")
+        elif secs(uid, kind):
+            text, mk = choose_section_view(
+                uid, kind, f"📂 В какой раздел добавим?\n\nВыбери раздел для {KIND_NAME[kind].lower()} или создай новый.",
+                f"ak:{kind}", f"akn:{kind}")
+            await msg.answer(text, reply_markup=mk)
+        else:
+            STATE[uid] = {"type": "add", "kind": kind, "sec": 0}
+            await msg.answer(add_prompt(kind, 0, uid))
+        await c.answer()
+        return
+
+    if cmd == "ak":
+        kind, sid = p[1], int(p[2])
+        STATE[uid] = {"type": "add", "kind": kind, "sec": sid}
+        await safe_edit(msg, add_prompt(kind, sid, uid), None)
+        await c.answer()
+        return
+
+    if cmd == "akn":
+        STATE[uid] = {"type": "sec_new", "kind": p[1], "then": "add"}
+        await msg.answer("✏️ Напиши название нового раздела (до 30 символов), например «Работа» или «Дом».")
+        await c.answer()
+        return
+
+    # --- черновики ---
+    if cmd in ("dk", "ds", "dsn", "dx"):
+        did = int(p[1])
+        d = DRAFTS.get(did)
+        if not d or d["uid"] != uid:
+            await safe_edit(msg, "Это уже сохранено или отменено.", None)
+            await c.answer()
+            return
+        if cmd == "dx":
+            DRAFTS.pop(did, None)
+            await safe_edit(msg, "❌ Не сохранил.", None)
+            await c.answer()
+            return
+        if cmd == "dk":
+            d["kind"] = p[2]
+            if secs(uid, d["kind"]):
+                text, mk = choose_section_view(
+                    uid, d["kind"], f"📂 В какой раздел сохранить?\n\n«{d['title']}»",
+                    f"ds:{did}", f"dsn:{did}")
+                await safe_edit(msg, text, mk)
+                await c.answer()
+                return
+            sid = 0
+        elif cmd == "ds":
+            sid = int(p[2])
+        else:  # dsn
+            STATE[uid] = {"type": "sec_new", "kind": d["kind"], "then": "draft", "ref": did,
+                          "msg": (msg.chat.id, msg.message_id)}
+            await msg.answer("✏️ Напиши название нового раздела (до 30 символов).")
+            await c.answer()
+            return
+        e = finalize_draft(did, sid)
+        resp, mk = item_response(e, tz, "✅ Сохранено")
+        await safe_edit(msg, resp, mk)
+        await c.answer()
+        return
+
+    # --- «Мои дела» ---
+    if cmd == "hub":
+        text, mk = hub_view(uid)
+        await safe_edit(msg, text, mk)
+        await c.answer()
+        return
+    if cmd == "sk":
+        text, mk = kind_view(uid, p[1])
+        await safe_edit(msg, text, mk)
+        await c.answer()
+        return
+    if cmd == "sv":
+        text, mk = section_view(uid, p[1], int(p[2]), tz)
+        await safe_edit(msg, text, mk)
+        await c.answer()
+        return
+    if cmd == "sn":
+        STATE[uid] = {"type": "sec_new", "kind": p[1], "then": "hub"}
+        await msg.answer("✏️ Напиши название нового раздела (до 30 символов), например «Работа», «Дом» или «Учёба».")
+        await c.answer()
+        return
+    if cmd == "sa":
+        kind, sid = p[1], int(p[2])
+        STATE[uid] = {"type": "add", "kind": kind, "sec": sid}
+        await msg.answer(add_prompt(kind, sid, uid))
+        await c.answer()
+        return
+    if cmd == "sren":
+        if get_sec(int(p[1]), uid):
+            STATE[uid] = {"type": "sec_rename", "sid": int(p[1])}
+            await msg.answer("✏️ Напиши новое название раздела.")
+        await c.answer()
+        return
+    if cmd == "sdel":
+        s = get_sec(int(p[1]), uid)
+        if s:
+            await safe_edit(
+                msg, f"🗑 Удалить раздел «{s['name']}»?\n\nСами дела не пропадут, они перейдут в «Без раздела».",
+                markup([[btn("Да, удалить", f"sdy:{s['id']}"), btn("Отмена", f"sv:{s['kind']}:{s['id']}")]]))
+        await c.answer()
+        return
+    if cmd == "sdy":
+        s = get_sec(int(p[1]), uid)
+        if s:
+            for e in ITEMS:
+                if e["sec"] == s["id"]:
+                    e["sec"] = 0
+            SECTIONS.remove(s)
+            text, mk = kind_view(uid, s["kind"])
+            await safe_edit(msg, "✅ Раздел удалён\n\n" + text, mk)
+        await c.answer()
+        return
+    if cmd == "dn":
+        text, mk = done_view(uid)
+        await safe_edit(msg, text, mk)
+        await c.answer()
+        return
+    if cmd == "dnclr":
+        ITEMS[:] = [e for e in ITEMS if not (e["user_id"] == uid and e["done"])]
+        text, mk = done_view(uid)
+        await safe_edit(msg, text, mk)
+        await c.answer("Очистил")
+        return
+
+    # --- действия с делом ---
+    e = find(int(p[1]), uid) if cmd in ("open", "done", "undo", "del", "kind", "mv", "mvs", "mvn",
+                                         "back", "tp", "cfg", "snz") and p[1] != "0" else None
+    if cmd == "cfg" and p[1] == "0":
+        await settings_cb(c, p)
+        return
+    if e is None:
+        await c.answer("Это дело уже удалено")
+        return
+
+    if cmd == "open":
+        await msg.answer(card(e, tz), reply_markup=kb(e))
+    elif cmd == "done":
+        e["done"] = True
+        await safe_edit(msg, "✅ Выполнено: " + e["title"], None)
+        await c.answer("Готово!")
+        return
+    elif cmd == "undo":
+        e["done"] = False
+        reset_fired(e)
+        text, mk = item_response(e, tz, "↩️ Вернул в список")
+        await safe_edit(msg, text, mk)
+    elif cmd == "del":
+        ITEMS.remove(e)
+        await safe_edit(msg, "🗑 Удалено", None)
+        await c.answer("Удалено")
+        return
+    elif cmd == "back":
+        await safe_edit(msg, card(e, tz), kb(e))
+    elif cmd == "kind":
+        e["kind"] = "task" if e["kind"] == "event" else "event"
+        e["sec"] = 0
+        name = "мероприятие" if e["kind"] == "event" else "задача"
+        text, mk = item_response(e, tz, f"🔄 Теперь это {name}")
+        await safe_edit(msg, text, mk)
+    elif cmd == "mv":
+        text, mk = choose_section_view(
+            uid, e["kind"], f"📂 Куда перенести?\n\n«{e['title']}»", f"mvs:{e['id']}", f"mvn:{e['id']}",
+            back=f"back:{e['id']}")
+        await safe_edit(msg, text, mk)
+    elif cmd == "mvs":
+        e["sec"] = int(p[2])
+        await safe_edit(msg, "✅ Перенёс\n" + card(e, tz), kb(e))
+    elif cmd == "mvn":
+        STATE[uid] = {"type": "sec_new", "kind": e["kind"], "then": "move", "ref": e["id"]}
+        await msg.answer("✏️ Напиши название нового раздела (до 30 символов).")
+    elif cmd == "snz":
+        mins = int(p[2])
+        e["snooze"] = int(time.time()) + mins * 60
+        await safe_edit(msg, f"⏰ Напомню через {fmt_min(mins)}: {e['title']}", None)
+    elif cmd == "tp":
+        await picker_cb(c, e, p[2:])
+        return
+    elif cmd == "cfg":
+        await item_cfg(c, e, p[2])
+        return
+    await c.answer()
+
+
+async def picker_cb(c, e, args):
+    uid = c.from_user.id
+    tz = get_tz(uid)
+    z = zone(tz)
+    msg = c.message
+    act = args[0]
+    if act == "back":
+        text, mk = picker_days(e, tz)
+    elif act == "d":
+        text, mk = picker_hours(e, tz, parse_day(args[1]))
+    elif act == "h":
+        text, mk = picker_minutes(e, tz, parse_day(args[1]), int(args[2]))
+    elif act in ("ok", "in"):
+        if act == "in":
+            ts = int((datetime.now(z) + timedelta(minutes=int(args[1]))).timestamp())
+        else:
+            d = parse_day(args[1])
+            ts = int(datetime.combine(d, dtime(int(args[2][:2]), int(args[2][2:])), tzinfo=z).timestamp())
+            if ts <= time.time():
+                await c.answer("Это время уже прошло, выбери другое", show_alert=True)
+                return
+        e["due"] = ts
+        reset_fired(e)
+        text, mk = "✅ Время поставлено\n" + card(e, tz), kb(e)
+    elif act == "txt":
+        STATE[uid] = {"type": "when", "eid": e["id"], "msg": (msg.chat.id, msg.message_id)}
+        await msg.answer("✍️ Напиши дату и время, например:\n• 18:30\n• завтра 9:00\n"
+                         "• 25.10 14:00\n• через 40 минут")
+        await c.answer()
+        return
+    else:  # x: отмена
+        text, mk = card(e, tz), kb(e)
+    await safe_edit(msg, text, mk)
+    await c.answer()
+
+
+async def item_cfg(c, e, what):
+    uid = c.from_user.id
+    tz = get_tz(uid)
+    msg = c.message
+    if what == "close":
+        await safe_edit(msg, card(e, tz), kb(e))
+        await c.answer()
+        return
+    if what == "rx":
+        STATE[uid] = {"type": "repeat", "eid": e["id"]}
+        await msg.answer("✍️ Напиши, через сколько минут повторять напоминание (число от 1 до 1440), например 7.")
+        await c.answer()
+        return
+    if what.startswith("r"):
+        e["repeat"] = int(what[1:])
+        e["nags"] = 0
+    elif what.startswith("t"):
+        o = int(what[1:])
+        if o in e["offsets"]:
+            e["offsets"].remove(o)
+        else:
+            e["offsets"].append(o)
+        e["offsets"].sort(reverse=True)
+        now = int(time.time())
+        e["fired"] |= {x for x in e["offsets"] if e["due"] and e["due"] - x * 60 <= now}
+    await safe_edit(msg, card(e, tz) + "\n\n👇 Настрой, когда напоминать", menu_kb(e["offsets"], e["repeat"], e["id"]))
+    await c.answer()
+
+
+async def settings_cb(c, p):
+    uid = c.from_user.id
+    s = get_set(uid)
+    what = p[2]
+    if what == "close":
+        try:
+            await c.message.delete()
+        except Exception:
+            pass
+        await c.answer()
+        return
+    if what == "rx":
+        STATE[uid] = {"type": "repeat", "eid": 0}
+        await c.message.answer("✍️ Напиши, через сколько минут повторять напоминания по умолчанию "
+                               "(число от 1 до 1440), например 7.")
+        await c.answer()
+        return
+    if what.startswith("r"):
+        s["repeat"] = int(what[1:])
+    elif what.startswith("t"):
+        o = int(what[1:])
+        if o in s["offsets"]:
+            s["offsets"].remove(o)
+        else:
+            s["offsets"].append(o)
+        s["offsets"].sort(reverse=True)
+    try:
+        await c.message.edit_reply_markup(reply_markup=menu_kb(s["offsets"], s["repeat"], 0))
+    except Exception:
+        pass
     await c.answer()
 
 
 # ---------- напоминания ----------
 
-async def send_safe(bot, uid, text, markup):
+async def send_safe(bot, uid, text, mk):
     try:
-        await bot.send_message(uid, text, reply_markup=markup)
+        await bot.send_message(uid, text, reply_markup=mk)
     except Exception:
         pass
 
 
-async def reminder_loop(bot: Bot):
+async def tick(bot):
+    """Один проход: кому пора напомнить."""
+    now = int(time.time())
+    for e in list(ITEMS):
+        if e["done"]:
+            continue
+        tzname = get_tz(e["user_id"])
+        if e.get("snooze") and now >= e["snooze"]:
+            e["snooze"] = None
+            await send_safe(bot, e["user_id"], "⏰ Напоминаю ещё раз\n" + card(e, tzname), kb_remind(e))
+        if not e["due"]:
+            continue
+        for o in sorted(e["offsets"], reverse=True):
+            if o not in e["fired"] and now >= e["due"] - o * 60:
+                e["fired"].add(o)
+                head = "⏰ Пора!" if o == 0 else f"🔔 Через {LEFT[o]}"
+                await send_safe(bot, e["user_id"], head + "\n" + card(e, tzname), kb_remind(e))
+        rep = e["repeat"]
+        if rep and e["nags"] < MAX_NAGS and now >= e["due"] + rep * 60 * (e["nags"] + 1):
+            e["nags"] += 1
+            await send_safe(bot, e["user_id"], "🔁 Ещё не отмечено «Готово»\n" + card(e, tzname), kb_remind(e))
+
+
+async def reminder_loop(bot):
     while True:
-        now = int(time.time())
-        for e in list(ITEMS):
-            if not e["due"] or e["done"]:
-                continue
-            tzname = get_tz(e["user_id"])
-            for o in sorted(e["offsets"], reverse=True):
-                if o not in e["fired"] and now >= e["due"] - o * 60:
-                    e["fired"].add(o)
-                    head = "⏰ Пора!" if o == 0 else f"🔔 Через {LEFT[o]}"
-                    await send_safe(bot, e["user_id"], head + "\n" + card(e, tzname), kb(e))
-            # режим «повторять каждый час, пока не отмечено Готово»
-            if e["repeat"] and e["nags"] < MAX_NAGS and now >= e["due"] + 3600 * (e["nags"] + 1):
-                e["nags"] += 1
-                await send_safe(bot, e["user_id"],
-                                "🔁 Ещё не отмечено «Готово»\n" + card(e, tzname), kb(e))
+        try:
+            await tick(bot)
+        except Exception:
+            logging.exception("reminder error")
         await asyncio.sleep(20)
 
 
@@ -800,13 +1398,12 @@ async def main():
     if not TOKEN:
         raise SystemExit("Не задана переменная BOT_TOKEN")
     bot = Bot(TOKEN)
-    # Команды появятся в меню «/» автоматически, в BotFather ничего вводить не нужно
     try:
         await bot.set_my_commands([
             BotCommand(command="start", description="Начать"),
             BotCommand(command="menu", description="Показать меню"),
             BotCommand(command="add", description="Добавить дело"),
-            BotCommand(command="list", description="Мои задачи и события"),
+            BotCommand(command="list", description="Мои дела и разделы"),
             BotCommand(command="settings", description="Напоминания"),
             BotCommand(command="tz", description="Часовой пояс"),
             BotCommand(command="help", description="Помощь"),
