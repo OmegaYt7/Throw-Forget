@@ -26,8 +26,7 @@ DEFAULT_TZ = "Europe/Moscow"
 EV_LABELS = {0: "в момент", 10: "за 10 м", 30: "за 30 м", 60: "за 1 ч", 180: "за 3 ч", 1440: "за 1 д"}
 EV_LEFT = {10: "10 м", 30: "30 м", 60: "1 ч", 180: "3 ч", 1440: "1 д"}
 # Задача: напоминания относительно срока (минуты -> подпись)
-TK_LABELS = {0: "в день срока", 1440: "за 1 д", 4320: "за 3 д"}
-TK_HOURS = [7, 8, 9, 10, 12, 15, 18, 20]   # время напоминания о задачах
+TK_LABELS = {0: "в срок", 1440: "за 1 д", 4320: "за 3 д"}
 REPEATS = [1, 2, 3, 6, 12, 24]             # повтор для задач, в часах (минимум 1 ч)
 MAX_REPEAT = 72
 MAX_NAGS = 12
@@ -72,6 +71,7 @@ STATE = {}       # user_id -> что бот ждёт от человека сл�
 USER_TZ = {}
 USER_SET = {}    # настройки по умолчанию
 AI_USED = {}
+USER_META = {}   # user_id -> {since, name}
 _ids, _sids, _dids = itertools.count(1), itertools.count(1), itertools.count(1)
 URL_RE = re.compile(r"https?://\S+")
 
@@ -85,7 +85,7 @@ SETTINGS_TEXT = (
     "Это настройки по умолчанию для новых дел. Для отдельного дела их можно поменять "
     "на его карточке кнопкой «🔔 Напоминания».\n\n"
     "📅 Мероприятия: предупреждаю заранее (за 10 м, 1 ч, 1 д и так далее).\n"
-    "📝 Задачи: напоминаю утром в день срока, можно повторять каждые N ч, пока не нажмёшь «Готово»."
+    "📝 Задачи: напоминаю в момент срока и заранее (за 1 д, за 3 д), можно повторять каждые N ч, пока не нажмёшь «Готово»."
 )
 
 
@@ -103,7 +103,7 @@ def get_set(uid):
     return USER_SET.setdefault(uid, {
         "ev_offsets": [60, 0],   # мероприятия: за 1 ч и в момент
         "tk_offsets": [0],       # задачи: в день срока
-        "tk_hour": 9,            # во сколько напоминать о задачах
+        "tk_hour": 9,            # время по умолчанию, если у задачи названа только дата
         "repeat": 0,             # повтор для задач, часы (0 = выкл)
     })
 
@@ -312,6 +312,13 @@ def task_ts(day, uid, tz):
     return ts if ts > time.time() else int(time.time()) + 3600
 
 
+def slot_ok(e, tz, day, h, m):
+    """Можно ли выбрать это время. Для задач на сегодня время должно быть не раньше чем через 1 ч."""
+    ts = int(datetime.combine(day, dtime(h, m), tzinfo=zone(tz)).timestamp())
+    margin = 3600 if e["kind"] == "task" else 0
+    return ts > time.time() + margin
+
+
 def is_overdue(e, tz):
     if e["kind"] != "task" or not e["due"] or e["done"]:
         return False
@@ -426,14 +433,9 @@ def month_summary(uid, year, month, tz):
 # ---------- тексты карточки ----------
 
 def remind_text(e, tz):
-    if e["kind"] == "event":
-        parts = [EV_LABELS[o] for o in sorted(e["offsets"], reverse=True)]
-        return ", ".join(parts) if parts else "без напоминаний"
-    parts = [TK_LABELS[o] for o in sorted(e["offsets"], reverse=True)]
-    s = ", ".join(parts) if parts else "без напоминаний"
-    if parts and e["due"]:
-        s += f" (в {datetime.fromtimestamp(e['due'], zone(tz)):%H:%M})"
-    return s
+    labels = EV_LABELS if e["kind"] == "event" else TK_LABELS
+    parts = [labels[o] for o in sorted(e["offsets"], reverse=True) if o in labels]
+    return ", ".join(parts) if parts else "без напоминаний"
 
 
 def card(e, tz):
@@ -444,7 +446,7 @@ def card(e, tz):
     if s:
         lines.append("📂 Раздел: " + s)
     if e["due"]:
-        lines.append(("🕐 " if event else "📅 Срок: ") + (fmt_time(e["due"], tz) if event else fmt_date(e["due"], tz)))
+        lines.append(("🕐 " if event else "📅 Срок: ") + fmt_time(e["due"], tz))
     elif event:
         lines.append("🕐 Время не задано. Нажми «Задать время»")
     else:
@@ -489,10 +491,9 @@ def next_hint(e, tz):
                 "• Нужны другие предупреждения? Нажми «🔔 Напоминания».\n"
                 "• «📍 Место» добавит адрес, а «📆 В календарь» пришлёт файл для календаря телефона.")
     if not e["due"]:
-        h = get_set(e["user_id"])["tk_hour"]
         return ("Что дальше:\n"
-                f"• Срок пока не задан, поэтому напоминаний не будет. Нажми «📅 Задать срок», "
-                f"и я напомню утром в {h:02d}:00 в день срока.\n"
+                "• Срок пока не задан, поэтому напоминаний не будет. Нажми «📅 Задать срок»: "
+                "выбери дату, час и минуты, и я напомню.\n"
                 "• «📋 Чек-лист» поможет разбить дело на пункты с галочками.\n"
                 "• «📂 Раздел» разложит дела по папкам, например «Работа» или «Дом».")
     return ("Что будет дальше:\n"
@@ -504,12 +505,23 @@ def next_hint(e, tz):
 def item_label(e, tz):
     z = zone(tz)
     if e["kind"] == "event":
-        when = datetime.fromtimestamp(e["due"], z).strftime("%d.%m %H:%M  ") if e["due"] else "без времени  "
-        return when + e["title"]
+        if not e["due"]:
+            return "без времени  " + e["title"]
+        past = "⌛ " if e["due"] < time.time() and not e["done"] else ""
+        return past + datetime.fromtimestamp(e["due"], z).strftime("%d.%m %H:%M  ") + e["title"]
     if e["due"]:
         mark = "🔴 " if is_overdue(e, tz) else ""
-        return f"{mark}до {datetime.fromtimestamp(e['due'], z):%d.%m}  {e['title']}"
+        return f"{mark}до {datetime.fromtimestamp(e['due'], z):%d.%m %H:%M}  {e['title']}"
     return e["title"]
+
+
+def list_sort_key(e):
+    """Порядок в списках: ближайшие первыми, прошедшие мероприятия в конце, дела без времени после всех."""
+    if e["due"] is None:
+        return (2, 0)
+    if e["kind"] == "event" and e["due"] < time.time():
+        return (1, -e["due"])
+    return (0, e["due"])
 
 
 def add_prompt(kind, sid, uid):
@@ -525,8 +537,8 @@ def add_prompt(kind, sid, uid):
 def day_add_prompt(kind, day):
     d = fmt_day(day)
     if kind == "task":
-        return (f"📝 Напиши задачу со сроком на {d}.\n\nНапример: «Сдать отчёт». Я поставлю срок на этот день "
-                "и напомню о нём утром в выбранное в настройках время.")
+        return (f"📝 Напиши задачу со сроком на {d}.\n\nМожно сразу указать время, например «Сдать отчёт в 15:00». "
+                "Если времени не будет, я предложу выбрать час и минуты кнопками.")
     return (f"📅 Напиши мероприятие на {d}.\n\nМожно сразу указать время, например «Встреча с Олей в 18:30». "
             "Если времени не будет, я предложу выбрать его кнопками. Если в это время уже есть другое "
             "мероприятие, я предупрежу, но добавить всё равно можно.")
@@ -647,3 +659,56 @@ def new_draft(uid, title, due, place=None, note=None):
 def finalize_draft(did, sid):
     d = DRAFTS.pop(did)
     return add_item(d["uid"], d["kind"], d["title"], d["due"], d["place"], d["note"], sid)
+
+
+# ---------- профиль ----------
+
+def touch_user(uid, name=None):
+    meta = USER_META.setdefault(uid, {"since": int(time.time()), "name": None})
+    if name:
+        meta["name"] = name
+
+
+def wipe_user(uid):
+    """Стереть дела, разделы и настройки человека. Часовой пояс остаётся."""
+    ITEMS[:] = [e for e in ITEMS if e["user_id"] != uid]
+    SECTIONS[:] = [s for s in SECTIONS if s["user_id"] != uid]
+    for did in [d for d, v in DRAFTS.items() if v["uid"] == uid]:
+        DRAFTS.pop(did, None)
+    USER_SET.pop(uid, None)
+    STATE.pop(uid, None)
+
+
+def profile_text(uid):
+    tz = get_tz(uid)
+    z = zone(tz)
+    now = time.time()
+    meta = USER_META.get(uid, {})
+    lines = ["👤 Профиль", ""]
+    lines.append(f"Имя: {meta['name']}" if meta.get("name") else "Имя: не указано")
+    if meta.get("since"):
+        days = max(0, int((now - meta["since"]) // 86400))
+        lines.append(f"С ботом с {datetime.fromtimestamp(meta['since'], z):%d.%m.%Y} ({days} д)")
+    lines += ["", f"🌍 Часовой пояс: {tz}", f"Сейчас у тебя {datetime.now(z):%H:%M}"]
+    tasks, events, done = items_of(uid, "task"), items_of(uid, "event"), items_of(uid, done=True)
+    over = sum(1 for e in tasks if is_overdue(e, tz))
+    upcoming = sorted((e for e in events if e["due"] and e["due"] > now), key=lambda e: e["due"])
+    lines += ["", "📊 Твои дела:",
+              f"• Задач: {len(tasks)}" + (f" (просрочено: {over})" if over else ""),
+              f"• Мероприятий: {len(events)}",
+              f"• Выполнено: {len(done)}",
+              f"• Разделов: {len([s for s in SECTIONS if s['user_id'] == uid])}"]
+    if upcoming:
+        lines.append(f"• Ближайшее мероприятие: {fmt_time(upcoming[0]['due'], tz)}, {upcoming[0]['title']}")
+    s = get_set(uid)
+    ev = ", ".join(EV_LABELS[o] for o in sorted(s["ev_offsets"], reverse=True) if o in EV_LABELS) or "без напоминаний"
+    tk = ", ".join(TK_LABELS[o] for o in sorted(s["tk_offsets"], reverse=True) if o in TK_LABELS) or "без напоминаний"
+    rep = f"повтор каждые {s['repeat']} ч" if s["repeat"] else "без повтора"
+    lines += ["", "🔔 Напоминания по умолчанию:", f"• Мероприятия: {ev}", f"• Задачи: {tk}, {rep}",
+              f"• Время по умолчанию для задач: {s['tk_hour']:02d}:00"]
+    if GROQ_KEY:
+        d, n = AI_USED.get(uid, (None, 0))
+        lines += ["", f"🤖 Разбор ИИ сегодня: {n if d == date.today() else 0} из {DAILY_AI_LIMIT}"]
+    else:
+        lines += ["", "🤖 Разбор ссылок и длинных текстов ИИ: выключен"]
+    return "\n".join(lines)
