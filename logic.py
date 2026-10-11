@@ -38,14 +38,75 @@ MONTHS = ["Январь", "Февраль", "Март", "Апрель", "Май"
           "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"]
 KIND_NAME = {"task": "📝 Задачи", "event": "📅 Мероприятия"}
 
-PRESETS = [
-    ("🇷🇺 Москва +3", "Europe/Moscow"), ("🇺🇦 Киев", "Europe/Kyiv"),
-    ("🇧🇾 Минск +3", "Europe/Minsk"), ("🇷🇺 Калининград +2", "Europe/Kaliningrad"),
-    ("🇷🇺 Самара +4", "Europe/Samara"), ("🇷🇺 Екатеринбург +5", "Asia/Yekaterinburg"),
-    ("🇰🇿 Алматы +5", "Asia/Almaty"), ("🇷🇺 Омск +6", "Asia/Omsk"),
-    ("🇷🇺 Новосибирск +7", "Asia/Novosibirsk"), ("🇷🇺 Иркутск +8", "Asia/Irkutsk"),
-    ("🇷🇺 Якутск +9", "Asia/Yakutsk"), ("🇷🇺 Владивосток +10", "Asia/Vladivostok"),
+# Города для выбора часового пояса: (флаг, город, часовой пояс)
+WORLD = [
+    ("🇺🇸", "Гонолулу", "Pacific/Honolulu"), ("🇺🇸", "Анкоридж", "America/Anchorage"),
+    ("🇺🇸", "Лос-Анджелес", "America/Los_Angeles"), ("🇺🇸", "Денвер", "America/Denver"),
+    ("🇺🇸", "Чикаго", "America/Chicago"), ("🇲🇽", "Мехико", "America/Mexico_City"),
+    ("🇺🇸", "Нью-Йорк", "America/New_York"), ("🇨🇦", "Торонто", "America/Toronto"),
+    ("🇨🇴", "Богота", "America/Bogota"), ("🇵🇪", "Лима", "America/Lima"),
+    ("🇻🇪", "Каракас", "America/Caracas"), ("🇨🇱", "Сантьяго", "America/Santiago"),
+    ("🇧🇷", "Сан-Паулу", "America/Sao_Paulo"), ("🇦🇷", "Буэнос-Айрес", "America/Argentina/Buenos_Aires"),
+    ("🇮🇸", "Рейкьявик", "Atlantic/Reykjavik"), ("🇬🇧", "Лондон", "Europe/London"),
+    ("🇵🇹", "Лиссабон", "Europe/Lisbon"), ("🇳🇬", "Лагос", "Africa/Lagos"),
+    ("🇫🇷", "Париж", "Europe/Paris"), ("🇩🇪", "Берлин", "Europe/Berlin"),
+    ("🇮🇹", "Рим", "Europe/Rome"), ("🇪🇸", "Мадрид", "Europe/Madrid"),
+    ("🇵🇱", "Варшава", "Europe/Warsaw"), ("🇨🇿", "Прага", "Europe/Prague"),
+    ("🇦🇹", "Вена", "Europe/Vienna"), ("🇿🇦", "Йоханнесбург", "Africa/Johannesburg"),
+    ("🇷🇺", "Калининград", "Europe/Kaliningrad"), ("🇬🇷", "Афины", "Europe/Athens"),
+    ("🇫🇮", "Хельсинки", "Europe/Helsinki"), ("🇱🇻", "Рига", "Europe/Riga"),
+    ("🇱🇹", "Вильнюс", "Europe/Vilnius"), ("🇪🇪", "Таллин", "Europe/Tallinn"),
+    ("🇺🇦", "Киев", "Europe/Kyiv"), ("🇷🇴", "Бухарест", "Europe/Bucharest"),
+    ("🇲🇩", "Кишинёв", "Europe/Chisinau"), ("🇹🇷", "Стамбул", "Europe/Istanbul"),
+    ("🇧🇾", "Минск", "Europe/Minsk"), ("🇷🇺", "Москва", "Europe/Moscow"),
+    ("🇪🇬", "Каир", "Africa/Cairo"), ("🇮🇱", "Иерусалим", "Asia/Jerusalem"),
+    ("🇸🇦", "Эр-Рияд", "Asia/Riyadh"), ("🇰🇪", "Найроби", "Africa/Nairobi"),
+    ("🇮🇷", "Тегеран", "Asia/Tehran"), ("🇬🇪", "Тбилиси", "Asia/Tbilisi"),
+    ("🇦🇿", "Баку", "Asia/Baku"), ("🇦🇲", "Ереван", "Asia/Yerevan"),
+    ("🇦🇪", "Дубай", "Asia/Dubai"), ("🇷🇺", "Самара", "Europe/Samara"),
+    ("🇺🇿", "Ташкент", "Asia/Tashkent"), ("🇷🇺", "Екатеринбург", "Asia/Yekaterinburg"),
+    ("🇰🇿", "Алматы", "Asia/Almaty"), ("🇵🇰", "Карачи", "Asia/Karachi"),
+    ("🇮🇳", "Дели", "Asia/Kolkata"), ("🇳🇵", "Катманду", "Asia/Kathmandu"),
+    ("🇰🇬", "Бишкек", "Asia/Bishkek"), ("🇷🇺", "Омск", "Asia/Omsk"),
+    ("🇧🇩", "Дакка", "Asia/Dhaka"), ("🇹🇭", "Бангкок", "Asia/Bangkok"),
+    ("🇻🇳", "Хошимин", "Asia/Ho_Chi_Minh"), ("🇷🇺", "Новосибирск", "Asia/Novosibirsk"),
+    ("🇷🇺", "Красноярск", "Asia/Krasnoyarsk"), ("🇮🇩", "Джакарта", "Asia/Jakarta"),
+    ("🇷🇺", "Иркутск", "Asia/Irkutsk"), ("🇨🇳", "Пекин", "Asia/Shanghai"),
+    ("🇸🇬", "Сингапур", "Asia/Singapore"), ("🇭🇰", "Гонконг", "Asia/Hong_Kong"),
+    ("🇵🇭", "Манила", "Asia/Manila"), ("🇦🇺", "Перт", "Australia/Perth"),
+    ("🇯🇵", "Токио", "Asia/Tokyo"), ("🇰🇷", "Сеул", "Asia/Seoul"),
+    ("🇷🇺", "Якутск", "Asia/Yakutsk"), ("🇦🇺", "Аделаида", "Australia/Adelaide"),
+    ("🇷🇺", "Владивосток", "Asia/Vladivostok"), ("🇦🇺", "Сидней", "Australia/Sydney"),
+    ("🇷🇺", "Магадан", "Asia/Magadan"), ("🇷🇺", "Камчатка", "Asia/Kamchatka"),
+    ("🇳🇿", "Окленд", "Pacific/Auckland"),
 ]
+# Первый экран выбора: самые частые
+POPULAR = ["Europe/Moscow", "Europe/Kyiv", "Europe/Minsk", "Europe/Kaliningrad", "Europe/Samara",
+           "Asia/Yekaterinburg", "Asia/Almaty", "Asia/Omsk", "Asia/Novosibirsk", "Asia/Irkutsk",
+           "Asia/Yakutsk", "Asia/Vladivostok"]
+
+
+def offset_str(name):
+    """Текущий сдвиг от UTC: +3, +5:30, -4. У городов с летним временем он меняется по сезону."""
+    mins = int(datetime.now(zone(name)).utcoffset().total_seconds() // 60)
+    h, m = divmod(abs(mins), 60)
+    return ("+" if mins >= 0 else "-") + str(h) + (f":{m:02d}" if m else "")
+
+
+def tz_label(flag, city, name):
+    return f"{flag} {city} {offset_str(name)}"
+
+
+def popular_entries():
+    by = {n: (f, c, n) for f, c, n in WORLD}
+    return [by[n] for n in POPULAR]
+
+
+def world_sorted():
+    """Все города от запада к востоку по текущему сдвигу."""
+    return sorted(WORLD, key=lambda x: (datetime.now(zone(x[2])).utcoffset(), x[1]))
+
+
 CITIES = {
     "москва": "Europe/Moscow", "санкт-петербург": "Europe/Moscow", "спб": "Europe/Moscow",
     "питер": "Europe/Moscow", "казань": "Europe/Moscow", "нижний новгород": "Europe/Moscow",
@@ -62,6 +123,7 @@ CITIES = {
     "лондон": "Europe/London", "стамбул": "Europe/Istanbul", "дубай": "Asia/Dubai",
     "нью-йорк": "America/New_York",
 }
+CITIES.update({c.lower().replace("ё", "е"): z for _, c, z in WORLD})
 
 # Пока без базы: всё в памяти, при перезапуске пропадает
 ITEMS = []       # дела: kind = "task" | "event"
@@ -72,12 +134,13 @@ USER_TZ = {}
 USER_SET = {}    # настройки по умолчанию
 AI_USED = {}
 USER_META = {}   # user_id -> {since, name}
+SELECT = {}      # user_id -> id дел, отмеченных для массовых действий
 _ids, _sids, _dids = itertools.count(1), itertools.count(1), itertools.count(1)
 URL_RE = re.compile(r"https?://\S+")
 
 TZ_PROMPT = (
     "🌍 Выбери свой часовой пояс. По нему я буду ставить время и присылать напоминания.\n\n"
-    "Нет в списке? Нажми «Ввести вручную»: напиши город, пояс (+3 или UTC+5) "
+    f"Нет в списке? Нажми «🌐 Все города» (их {len(WORLD)}) или «Ввести вручную»: напиши город, пояс (+3 или UTC+5) "
     "или просто сколько сейчас у тебя времени (например 15:30)."
 )
 SETTINGS_TEXT = (
@@ -452,7 +515,12 @@ def card(e, tz):
     else:
         lines.append("📅 Срок не задан")
     if is_overdue(e, tz):
-        lines.append("⚠️ Просрочено")
+        lines.append(f"🔴 Просрочено на {overdue_days(e, tz)} д")
+        lines.append("Срок прошёл. Нажми «✅ Готово», если уже сделал, или «📅 Изменить срок», чтобы перенести.")
+    elif is_past_event(e):
+        lines.append("⌛ Мероприятие уже прошло.")
+        lines.append("Нажми «✅ Готово», чтобы убрать его в выполненные, «🕐 Изменить время», чтобы перенести, "
+                     "или «🗑 Удалить».")
     cf = conflicts_for(e)
     if cf:
         lines.append("⚠️ В это время уже есть другое мероприятие:")
@@ -489,7 +557,8 @@ def next_hint(e, tz):
         return ("Что будет дальше:\n"
                 f"• Я предупрежу: {remind_text(e, tz)}.\n"
                 "• Нужны другие предупреждения? Нажми «🔔 Напоминания».\n"
-                "• «📍 Место» добавит адрес, а «📆 В календарь» пришлёт файл для календаря телефона.")
+                "• «📍 Место» добавит адрес. А «📆 В календарь телефона» (по желанию) пришлёт файл, "
+                "чтобы добавить мероприятие в календарь на телефоне.")
     if not e["due"]:
         return ("Что дальше:\n"
                 "• Срок пока не задан, поэтому напоминаний не будет. Нажми «📅 Задать срок»: "
@@ -507,11 +576,12 @@ def item_label(e, tz):
     if e["kind"] == "event":
         if not e["due"]:
             return "без времени  " + e["title"]
-        past = "⌛ " if e["due"] < time.time() and not e["done"] else ""
+        past = "⌛ " if is_past_event(e) else ""
         return past + datetime.fromtimestamp(e["due"], z).strftime("%d.%m %H:%M  ") + e["title"]
     if e["due"]:
-        mark = "🔴 " if is_overdue(e, tz) else ""
-        return f"{mark}до {datetime.fromtimestamp(e['due'], z):%d.%m %H:%M}  {e['title']}"
+        if is_overdue(e, tz):
+            return f"🔴 просрочено {overdue_days(e, tz)} д  {e['title']}"
+        return f"до {datetime.fromtimestamp(e['due'], z):%d.%m %H:%M}  {e['title']}"
     return e["title"]
 
 
@@ -519,7 +589,7 @@ def list_sort_key(e):
     """Порядок в списках: ближайшие первыми, прошедшие мероприятия в конце, дела без времени после всех."""
     if e["due"] is None:
         return (2, 0)
-    if e["kind"] == "event" and e["due"] < time.time():
+    if is_past_event(e):
         return (1, -e["due"])
     return (0, e["due"])
 
@@ -712,3 +782,37 @@ def profile_text(uid):
     else:
         lines += ["", "🤖 Разбор ссылок и длинных текстов ИИ: выключен"]
     return "\n".join(lines)
+
+
+# ---------- просроченное и массовые действия ----------
+
+def is_past_event(e):
+    """Мероприятие уже закончилось (прошёл час после начала) и не отмечено выполненным."""
+    return e["kind"] == "event" and bool(e["due"]) and not e["done"] and e["due"] + EVENT_MIN * 60 < time.time()
+
+
+def overdue_days(e, tz):
+    z = zone(tz)
+    return max(0, (datetime.now(z).date() - datetime.fromtimestamp(e["due"], z).date()).days)
+
+
+def overdue_items(uid, tz):
+    """Задачи с прошедшим сроком и мероприятия, которые уже закончились."""
+    res = [e for e in ITEMS if e["user_id"] == uid and not e["done"] and (is_overdue(e, tz) or is_past_event(e))]
+    return sorted(res, key=lambda e: e["due"])
+
+
+def ctx_items(uid, ctx, tz):
+    """Дела, которые показывает экран списка. ctx: sec.<тип>.<раздел> | day.<дата> | over | done."""
+    parts = ctx.split(".")
+    if parts[0] == "sec":
+        items = items_of(uid, parts[1], int(parts[2]))
+        items.sort(key=list_sort_key)
+        return items
+    if parts[0] == "day":
+        return items_on_day(uid, parse_day(parts[1]), tz)
+    if parts[0] == "over":
+        return overdue_items(uid, tz)
+    if parts[0] == "done":
+        return items_of(uid, done=True)[-30:]
+    return []
