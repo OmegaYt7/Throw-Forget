@@ -36,9 +36,9 @@ B_TZ = "🌍 Часовой пояс"
 B_HELP = "❓ Помощь"
 MAIN_KB = ReplyKeyboardMarkup(
     keyboard=[[KeyboardButton(text=B_ADD), KeyboardButton(text=B_LIST)],
-              [KeyboardButton(text=B_CAL), KeyboardButton(text=B_PROFILE)],
+              [KeyboardButton(text=B_CAL), KeyboardButton(text=B_HELP)],
               [KeyboardButton(text=B_REM), KeyboardButton(text=B_TZ)],
-              [KeyboardButton(text=B_HELP)]],
+              [KeyboardButton(text=B_PROFILE)]],
     resize_keyboard=True, is_persistent=True,
 )
 
@@ -56,17 +56,36 @@ def markup(rows):
 
 
 def profile_kb():
-    return markup([
-        [btn("🌍 Часовой пояс", "pf:tz"), btn("🔔 Напоминания", "pf:rem")],
-        [btn("🗓 Календарь", "pf:cal"), btn("📋 Мои дела", "pf:list")],
-        [btn("🗑 Стереть мои данные", "pf:wipe")],
-    ])
+    return markup([[btn("🗑 Стереть мои данные", "pf:wipe")]])
+
+
+TZ_PAGE = 12
 
 
 def tz_kb():
-    rows = chunk([btn(label, f"tz:{name}") for label, name in PRESETS], 2)
+    rows = chunk([btn(tz_label(f, c, n), f"tz:{n}") for f, c, n in popular_entries()], 2)
+    rows.append([btn(f"🌐 Все города ({len(WORLD)})", "tzp:0")])
     rows.append([btn("✍️ Ввести вручную", "tz:manual")])
     return markup(rows)
+
+
+def tz_page_view(page):
+    world = world_sorted()
+    pages = max(1, -(-len(world) // TZ_PAGE))
+    page = min(max(page, 0), pages - 1)
+    rows = chunk([btn(tz_label(f, c, n), f"tz:{n}") for f, c, n in world[page * TZ_PAGE:(page + 1) * TZ_PAGE]], 2)
+    nav = []
+    if page > 0:
+        nav.append(btn("◀️", f"tzp:{page - 1}"))
+    nav.append(btn(f"{page + 1}/{pages}", "noop"))
+    if page < pages - 1:
+        nav.append(btn("▶️", f"tzp:{page + 1}"))
+    rows.append(nav)
+    rows.append([btn("⬅️ Популярные", "tzp:pop"), btn("✍️ Вручную", "tz:manual")])
+    text = ("🌐 Все города\n\nГорода идут от запада к востоку: сначала пояса с минусом, дальше с плюсом. "
+            "Число рядом с городом это сдвиг от UTC прямо сейчас (в городах с летним временем он меняется по сезону). "
+            "Выбери свой город или любой с таким же временем.")
+    return text, markup(rows)
 
 
 # ---------- карточка дела: кнопки ----------
@@ -82,7 +101,7 @@ def kb(e):
             row2.append(btn("🔔 Напоминания", f"cfg:{eid}:e:main"))
         return markup([
             top, row2,
-            [btn("📍 Место", f"pl:{eid}"), btn("📆 В календарь", f"ics:{eid}")],
+            [btn("📍 Место", f"pl:{eid}"), btn("📆 В календарь телефона", f"ics:{eid}")],
             [btn("📂 Раздел", f"mv:{eid}"), btn("🔄 Сменить тип", f"kind:{eid}")],
         ])
     row2 = [btn("📅 Изменить срок" if e["due"] else "📅 Задать срок", f"tp:{eid}:back")]
@@ -309,68 +328,36 @@ def month_view(uid, year, month, tz):
     return text, markup(rows)
 
 
-def day_view(uid, day, tz):
-    z = zone(tz)
-    today = datetime.now(z).date()
-    items = items_on_day(uid, day, tz)
-    events = [e for e in items if e["kind"] == "event"]
-    tasks = [e for e in items if e["kind"] == "task"]
-    title = f"🗓 {fmt_day(day)}" + (" (сегодня)" if day == today else "")
-    lines = [title]
-    clash = False
-    if not items:
-        lines += ["", "В этот день пока ничего нет."]
-        if day >= today:
-            lines.append("Нажми «➕ Мероприятие» или «➕ Задача», чтобы добавить дело на этот день.")
-    if events:
-        lines += ["", "📅 Мероприятия:"]
-        for e in events:
-            hhmm = datetime.fromtimestamp(e["due"], z).strftime("%H:%M")
-            if e["done"]:
-                mark = "✅"
-            elif conflicts_for(e):
-                mark, clash = "⚠️", True
-            else:
-                mark = "🕐"
-            lines.append(f"{mark} {hhmm} · {e['title']}")
-    if tasks:
-        lines += ["", "📝 Задачи со сроком в этот день:"]
-        for e in tasks:
-            hhmm = datetime.fromtimestamp(e["due"], z).strftime("%H:%M")
-            lines.append(("✅ " if e["done"] else "• ") + f"{e['title']} (срок в {hhmm})")
-    if clash:
-        lines += ["", "⚠️ Некоторые мероприятия пересекаются по времени. Открой их и поменяй время, если нужно."]
-    rows = []
-    for e in items[:10]:
-        hhmm = datetime.fromtimestamp(e["due"], z).strftime("%H:%M")
-        rows.append([btn(f"{'📅' if e['kind'] == 'event' else '📝'} {hhmm} {e['title']}"[:60], f"open:{e['id']}")])
-    if day >= today:
-        rows.append([btn("➕ Мероприятие", f"ca:{ymd(day)}:event"), btn("➕ Задача", f"ca:{ymd(day)}:task")])
-    rows.append([btn("◀️ День", f"cd:{ymd(day - timedelta(days=1))}"),
-                 btn("День ▶️", f"cd:{ymd(day + timedelta(days=1))}")])
-    rows.append([btn("🗓 К календарю", f"cal:{day.year}{day.month:02d}")])
-    return "\n".join(lines), markup(rows)
+def day_view(uid, day, tz, select=None, note=""):
+    return ctx_view(uid, f"day.{ymd(day)}", tz, select, note)
 
 
 # ---------- экраны «Мои дела» ----------
 
 def hub_view(uid):
     t, ev, dn = len(items_of(uid, "task")), len(items_of(uid, "event")), len(items_of(uid, done=True))
+    over = len(overdue_items(uid, get_tz(uid)))
     text = (
         "📋 Мои дела\n\n"
         "📝 Задачи: дела со сроком (дата и время). Напоминаю в срок и заранее, можно вести чек-лист, "
         "просроченные подсвечиваются 🔴.\n"
-        "📅 Мероприятия: события в точное время и с местом. Предупреждаю заранее "
-        "и могу добавить в календарь телефона.\n\n"
+        "📅 Мероприятия: события в точное время и с местом. Предупреждаю заранее, "
+        "по желанию могу прислать файл для календаря телефона.\n\n"
         "В каждой группе можно создавать свои разделы: «Работа», «Дом», «Учёба».\n"
-        "А все дела по дням смотри в «🗓 Календарь» в меню внизу.\n\n"
-        "Что открыть?"
+        "А все дела по дням смотри в «🗓 Календарь» в меню внизу.\n"
     )
-    return text, markup([
+    rows = []
+    if over:
+        text += ("\n🔴 Есть просроченные задачи и закончившиеся мероприятия. Открой «Просрочено», "
+                 "чтобы быстро отметить их выполненными или удалить.\n")
+        rows.append([btn(f"🔴 Просрочено и прошло ({over})", "ov")])
+    text += "\nЧто открыть?"
+    rows += [
         [btn(f"📝 Задачи ({t})", "sk:task")],
         [btn(f"📅 Мероприятия ({ev})", "sk:event")],
         [btn(f"✅ Выполненные ({dn})", "dn")],
-    ])
+    ]
+    return text, markup(rows)
 
 
 def kind_view(uid, kind):
@@ -384,32 +371,122 @@ def kind_view(uid, kind):
     return f"{KIND_NAME[kind]}\n\n{intro}", markup(rows)
 
 
-def section_view(uid, kind, sid, tz):
-    s = get_sec(sid, uid) if sid else None
-    items = items_of(uid, kind, sid)
-    items.sort(key=list_sort_key)
-    rows = [[btn(item_label(e, tz)[:60], f"open:{e['id']}")] for e in items[:15]]
-    rows.append([btn("➕ Добавить сюда", f"sa:{kind}:{sid}")])
-    if s:
-        rows.append([btn("✏️ Переименовать", f"sren:{sid}"), btn("🗑 Удалить раздел", f"sdel:{sid}")])
-    rows.append([btn("◀️ Назад", f"sk:{kind}")])
-    name = s["name"] if s else "Без раздела"
-    if items:
-        more = f"\n(показаны первые 15 из {len(items)})" if len(items) > 15 else ""
-        body = "Нажми на дело, чтобы открыть его." + more
+def ctx_view(uid, ctx, tz, select=None, note=""):
+    """Экран списка дел. select=None: обычный режим, множество id: режим выбора для массового удаления."""
+    z = zone(tz)
+    today = datetime.now(z).date()
+    parts = ctx.split(".")
+    all_items = ctx_items(uid, ctx, tz)
+    items = all_items[:30]
+    ids = {e["id"] for e in items}
+    sel = (select & ids) if select is not None else None
+    lines, footer = [], []
+
+    def icon(e):
+        return "📅" if e["kind"] == "event" else "📝"
+
+    if parts[0] == "sec":
+        kind, sid = parts[1], int(parts[2])
+        s = get_sec(sid, uid) if sid else None
+        lines += [f"{KIND_NAME[kind]} → {s['name'] if s else 'Без раздела'}", "",
+                  "Нажми на дело, чтобы открыть его." if items else
+                  "Здесь пока пусто. Нажми «➕ Добавить сюда» или просто отправь мне текст."]
+        footer.append([btn("➕ Добавить сюда", f"sa:{kind}:{sid}")])
+        if s:
+            footer.append([btn("✏️ Переименовать", f"sren:{sid}"), btn("🗑 Удалить раздел", f"sdel:{sid}")])
+        footer.append([btn("◀️ Назад", f"sk:{kind}")])
+        label = lambda e: item_label(e, tz)
+    elif parts[0] == "day":
+        day = parse_day(parts[1])
+        events = [e for e in all_items if e["kind"] == "event"]
+        tasks = [e for e in all_items if e["kind"] == "task"]
+        lines.append(f"🗓 {fmt_day(day)}" + (" (сегодня)" if day == today else ""))
+        clash = False
+        if not all_items:
+            lines += ["", "В этот день пока ничего нет."]
+            if day >= today:
+                lines.append("Нажми «➕ Мероприятие» или «➕ Задача», чтобы добавить дело на этот день.")
+        if events:
+            lines += ["", "📅 Мероприятия:"]
+            for e in events:
+                hhmm = datetime.fromtimestamp(e["due"], z).strftime("%H:%M")
+                if e["done"]:
+                    mark = "✅"
+                elif conflicts_for(e):
+                    mark, clash = "⚠️", True
+                else:
+                    mark = "🕐"
+                lines.append(f"{mark} {hhmm} · {e['title']}")
+        if tasks:
+            lines += ["", "📝 Задачи со сроком в этот день:"]
+            for e in tasks:
+                hhmm = datetime.fromtimestamp(e["due"], z).strftime("%H:%M")
+                lines.append(("✅ " if e["done"] else "• ") + f"{e['title']} (срок в {hhmm})")
+        if clash:
+            lines += ["", "⚠️ Некоторые мероприятия пересекаются по времени. Открой их и поменяй время, если нужно."]
+        if day >= today:
+            footer.append([btn("➕ Мероприятие", f"ca:{ymd(day)}:event"), btn("➕ Задача", f"ca:{ymd(day)}:task")])
+        footer.append([btn("◀️ День", f"cd:{ymd(day - timedelta(days=1))}"),
+                       btn("День ▶️", f"cd:{ymd(day + timedelta(days=1))}")])
+        footer.append([btn("🗓 К календарю", f"cal:{day.year}{day.month:02d}")])
+        label = lambda e: f"{icon(e)} {datetime.fromtimestamp(e['due'], z):%H:%M} {e['title']}"
+    elif parts[0] == "over":
+        if items:
+            lines += ["🔴 Просрочено и прошло", "",
+                      "Здесь задачи, срок которых прошёл, и мероприятия, которые уже закончились.",
+                      "• «✅ Готово»: если уже сделал",
+                      "• «🗑 Удалить»: если больше не нужно",
+                      "• открой дело и нажми «Изменить срок», чтобы перенести",
+                      "", "Чтобы разобрать много дел сразу, нажми «🗑 Выбрать и удалить»: отметь нужные и выбери действие."]
+            footer.append([btn(f"🧹 Удалить все ({len(items)})", "xq:over")])
+        else:
+            lines += ["🔴 Просрочено и прошло", "", "Всё в порядке: просроченных дел нет 🎉"]
+        footer.append([btn("◀️ Назад", "hub")])
+        label = lambda e: f"{icon(e)} " + item_label(e, tz)
+    else:  # done
+        lines += ["✅ Выполненные", "",
+                  "Нажми на дело, чтобы вернуть его в список или удалить." if items else "Выполненных дел пока нет."]
+        if items:
+            footer.append([btn("🧹 Очистить выполненные", "dnclr")])
+        footer.append([btn("◀️ Назад", "hub")])
+        label = lambda e: f"{icon(e)} {e['title']}"
+
+    if len(all_items) > 30:
+        lines += ["", f"(показаны первые 30 из {len(all_items)})"]
+    if sel is not None:
+        lines += ["", f"🗑 Режим выбора. Нажимай на дела, чтобы отметить их (⬜️ → ☑️), потом выбери действие. "
+                      f"Отмечено: {len(sel)}."]
+
+    rows = []
+    for e in items:
+        lab = label(e)[:55]
+        if sel is None:
+            rows.append([btn(lab, f"open:{e['id']}")])
+        else:
+            rows.append([btn(("☑️ " if e["id"] in sel else "⬜️ ") + lab, f"xt:{ctx}:{e['id']}")])
+    if sel is None:
+        if items:
+            rows.append([btn("🗑 Выбрать и удалить", f"xs:{ctx}")])
+        rows += footer
     else:
-        body = "Здесь пока пусто. Нажми «➕ Добавить сюда» или просто отправь мне текст."
-    return f"{KIND_NAME[kind]} → {name}\n\n{body}", markup(rows)
+        n = len(sel)
+        rows.append([btn("☑️ Выбрать все" if n < len(items) else "◻️ Снять все", f"xa:{ctx}"),
+                     btn("✖️ Отмена", f"xc:{ctx}")])
+        if n:
+            act = [btn(f"🗑 Удалить ({n})", f"xd:{ctx}")]
+            if parts[0] != "done":
+                act.append(btn(f"✅ Выполнено ({n})", f"xk:{ctx}"))
+            rows.append(act)
+    text = "\n".join(lines)
+    return ((note + "\n\n") if note else "") + text, markup(rows)
 
 
-def done_view(uid):
-    items = items_of(uid, done=True)[-15:]
-    rows = [[btn(("📅 " if e["kind"] == "event" else "📝 ") + e["title"][:55], f"open:{e['id']}")] for e in items]
-    if items:
-        rows.append([btn("🧹 Очистить выполненные", "dnclr")])
-    rows.append([btn("◀️ Назад", "hub")])
-    body = "Нажми на дело, чтобы вернуть его в список или удалить." if items else "Выполненных дел пока нет."
-    return f"✅ Выполненные\n\n{body}", markup(rows)
+def section_view(uid, kind, sid, tz, select=None, note=""):
+    return ctx_view(uid, f"sec.{kind}.{sid}", tz, select, note)
+
+
+def done_view(uid, select=None, note=""):
+    return ctx_view(uid, "done", get_tz(uid), select, note)
 
 
 def choose_section_view(uid, kind, intro, pick, new_cb, back=None):
@@ -431,7 +508,7 @@ def draft_view(did, tz):
     lines += [
         "",
         "📝 Задача: дело со сроком (дата и время). Напомню в срок и заранее, можно вести чек-лист и повторять напоминания.",
-        "📅 Мероприятие: событие в точное время и с местом. Предупрежу заранее и добавлю в календарь телефона.",
+        "📅 Мероприятие: событие в точное время и с местом. Предупрежу заранее, по желанию можно добавить в календарь телефона.",
         "",
         "Выбери, как сохранить 👇",
     ]
@@ -530,11 +607,11 @@ async def help_cmd(m: Message):
         "• место\n"
         "• предупреждение заранее: за 10 м, 1 ч, 1 д\n"
         "• если в это время уже есть другое мероприятие, предупрежу (добавить всё равно можно)\n"
-        "• кнопка «📆 В календарь» добавит его в календарь телефона\n\n"
+        "• по желанию «📆 В календарь телефона» пришлёт файл, чтобы добавить его в календарь на телефоне\n\n"
+        "🔴 Просроченное: задачи с прошедшим сроком и закончившиеся мероприятия собраны в «📋 Мои дела» → «🔴 Просрочено». Там их можно быстро отметить выполненными или удалить.\n\n"
         "🗓 Календарь: все дела по дням. Нажми на число, чтобы увидеть день и добавить в него дело.\n\n"
         "👤 Профиль: твоя статистика, настройки и кнопка, чтобы стереть свои данные.\n\n"
-        "Разделы («Работа», «Дом» и так далее) создаются отдельно для задач и мероприятий в «📋 Мои дела».\n\n"
-        "Команды: /add /list /calendar /profile /settings /tz /menu /help"
+        "Разделы («Работа», «Дом» и так далее) создаются отдельно для задач и мероприятий в «📋 Мои дела»."
     )
 
 
@@ -939,6 +1016,26 @@ async def dispatch(c: CallbackQuery):
         await c.answer()
         return
 
+    # --- все города ---
+    if cmd == "tzp":
+        if p[1] == "pop":
+            await safe_edit(msg, TZ_PROMPT, tz_kb())
+        else:
+            text, mk = tz_page_view(int(p[1]))
+            await safe_edit(msg, text, mk)
+        await c.answer()
+        return
+
+    # --- просроченное и массовый выбор ---
+    if cmd == "ov":
+        text, mk = ctx_view(uid, "over", tz)
+        await safe_edit(msg, text, mk)
+        await c.answer()
+        return
+    if cmd in ("xs", "xt", "xa", "xc", "xd", "xr", "xy", "xk", "xq"):
+        await select_cb(c, cmd, p[1], p[2:])
+        return
+
     # --- календарь ---
     if cmd == "cal":
         y, mo = int(p[1][:4]), min(max(int(p[1][4:]), 1), 12)
@@ -1164,14 +1261,75 @@ async def dispatch(c: CallbackQuery):
             return
         await msg.answer_document(
             BufferedInputFile(build_ics(e), filename="meropriyatie.ics"),
-            caption="📆 Открой этот файл на телефоне, и мероприятие добавится в календарь "
-                    "вместе с напоминаниями.")
+            caption="📆 Файл для календаря телефона.\n\n"
+                    "Как добавить: нажми на файл, выбери «Открыть с помощью» и приложение Календарь "
+                    "(Google Календарь, Samsung Calendar и т. п.), затем «Сохранить». "
+                    "На iPhone: нажми на файл и «Добавить в Календарь».\n\n"
+                    "Внутри Telegram этот файл не открывается, он нужен только для календаря на телефоне.")
     elif cmd == "tp":
         await picker_cb(c, e, p[2:])
         return
     elif cmd == "ck":
         await check_cb(c, e, p[2])
         return
+    await c.answer()
+
+
+async def select_cb(c, cmd, ctx, rest):
+    """Массовый выбор дел в списке: отметить, удалить, отметить выполненными."""
+    uid = c.from_user.id
+    tz = get_tz(uid)
+    msg = c.message
+    items = ctx_items(uid, ctx, tz)[:30]
+    ids = {e["id"] for e in items}
+    if cmd == "xs":
+        SELECT[uid] = set()
+    elif cmd == "xt":
+        eid = int(rest[0])
+        cur = SELECT.setdefault(uid, set())
+        if eid in ids:
+            cur.symmetric_difference_update({eid})
+    elif cmd == "xa":
+        cur = SELECT.setdefault(uid, set())
+        SELECT[uid] = set() if ids and ids <= cur else set(ids)
+    elif cmd == "xc":
+        SELECT.pop(uid, None)
+        text, mk = ctx_view(uid, ctx, tz)
+        await safe_edit(msg, text, mk)
+        await c.answer()
+        return
+    elif cmd in ("xd", "xq"):
+        if cmd == "xq":
+            SELECT[uid] = set(ids)
+        chosen = [e for e in items if e["id"] in SELECT.get(uid, set())]
+        if not chosen:
+            await c.answer("Сначала отметь дела", show_alert=True)
+            return
+        names = "\n".join("• " + e["title"][:40] for e in chosen[:8])
+        more = f"\n…и ещё {len(chosen) - 8}" if len(chosen) > 8 else ""
+        await safe_edit(
+            msg, f"🗑 Удалить выбранные дела ({len(chosen)})?\n\n{names}{more}\n\nЭто нельзя отменить.",
+            markup([[btn(f"Да, удалить ({len(chosen)})", f"xy:{ctx}"), btn("Отмена", f"xr:{ctx}")]]))
+        await c.answer()
+        return
+    elif cmd in ("xy", "xk"):
+        chosen = [e for e in items if e["id"] in SELECT.get(uid, set())]
+        if cmd == "xy":
+            gone = {e["id"] for e in chosen}
+            ITEMS[:] = [e for e in ITEMS if not (e["user_id"] == uid and e["id"] in gone)]
+            note = f"🗑 Удалено дел: {len(chosen)}"
+        else:
+            for e in chosen:
+                e["done"] = True
+            note = f"✅ Отмечено выполненными: {len(chosen)}"
+        SELECT.pop(uid, None)
+        text, mk = ctx_view(uid, ctx, tz, note=note)
+        await safe_edit(msg, text, mk)
+        await c.answer()
+        return
+    # xs, xt, xa, xr: показать режим выбора
+    text, mk = ctx_view(uid, ctx, tz, select=SELECT.setdefault(uid, set()))
+    await safe_edit(msg, text, mk)
     await c.answer()
 
 
