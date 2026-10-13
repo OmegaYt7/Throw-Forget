@@ -798,7 +798,8 @@ async def admin_cmd(m: Message):
     await m.answer(
         "👑 Администратор\n\n"
         f"Пользователей: {st['users']}\nАктивных дел: {st['items']}\nВыполненных: {st['done']}\n"
-        f"Подписчиков Pro: {st['pro']}\nОплат: {st['payments']} (всего {st['stars']} ⭐)\n\n"
+        f"Подписчиков Pro: {st['pro']}\nОплат: {st['payments']} (всего {st['stars']} ⭐)\n"
+        f"База данных: {storage.backend_name()}\n\n"
         "Команды:\n/grant ID [дни]: выдать Pro\n/revoke ID: забрать Pro\n/backup: прислать копию базы\n"
         "Чтобы восстановить данные, пришли мне файл копии (.db).")
 
@@ -1926,7 +1927,12 @@ async def main():
     global _last_saved
     if not TOKEN:
         raise SystemExit("Не задана переменная BOT_TOKEN")
-    state = storage.load()
+    logging.info("База данных: %s", storage.backend_name())
+    try:
+        state = storage.load()
+    except Exception as ex:  # noqa: BLE001
+        # Не стартуем с пустыми данными: иначе первое сохранение затёрло бы настоящие данные в базе.
+        raise SystemExit(f"Не удалось загрузить данные из базы: {ex}")
     if state:
         restore(state)
         logging.info("Данные загружены: дел %d, пользователей %d", len(ITEMS), len(USER_TZ))
