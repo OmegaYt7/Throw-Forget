@@ -1,0 +1,5 @@
+aiogram>=3.13
+aiohttp
+dateparser>=1.2
+tzdata
+psycopg2-binary
