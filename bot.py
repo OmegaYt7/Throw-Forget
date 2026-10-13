@@ -4,6 +4,7 @@
 """
 import asyncio
 import calendar
+import json
 import logging
 import os
 import re
@@ -15,12 +16,13 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     BotCommand, BufferedInputFile, CallbackQuery, InlineKeyboardButton,
-    InlineKeyboardMarkup, KeyboardButton, Message, ReplyKeyboardMarkup,
+    InlineKeyboardMarkup, KeyboardButton, LabeledPrice, Message, PreCheckoutQuery, ReplyKeyboardMarkup,
 )
 
 # Всё нужное из logic.py (данные, время, дела, разделы, календарь, ИИ)
 from logic import *  # noqa: F401,F403
 from logic import slot_ok
+import storage
 
 logging.basicConfig(level=logging.INFO)
 
@@ -36,8 +38,8 @@ B_TZ = "🌍 Часовой пояс"
 B_HELP = "❓ Помощь"
 MAIN_KB = ReplyKeyboardMarkup(
     keyboard=[[KeyboardButton(text=B_ADD), KeyboardButton(text=B_LIST)],
-              [KeyboardButton(text=B_CAL), KeyboardButton(text=B_HELP)],
-              [KeyboardButton(text=B_REM), KeyboardButton(text=B_TZ)],
+              [KeyboardButton(text=B_CAL), KeyboardButton(text=B_TZ)],
+              [KeyboardButton(text=B_REM), KeyboardButton(text=B_HELP)],
               [KeyboardButton(text=B_PROFILE)]],
     resize_keyboard=True, is_persistent=True,
 )
@@ -90,6 +92,11 @@ def tz_page_view(page):
 
 # ---------- карточка дела: кнопки ----------
 
+def rec_btn(e):
+    label = "♻️ " + (rec_text(e["rec"]) if e.get("rec") else "Повторять дело")
+    return btn(label[:40], f"rc:{e['id']}:menu")
+
+
 def kb(e):
     eid = e["id"]
     if e["done"]:
@@ -99,19 +106,19 @@ def kb(e):
         row2 = [btn("🕐 Изменить время" if e["due"] else "🕐 Задать время", f"tp:{eid}:back")]
         if e["due"]:
             row2.append(btn("🔔 Напоминания", f"cfg:{eid}:e:main"))
-        return markup([
-            top, row2,
-            [btn("📍 Место", f"pl:{eid}"), btn("📆 В календарь телефона", f"ics:{eid}")],
-            [btn("📂 Раздел", f"mv:{eid}"), btn("🔄 Сменить тип", f"kind:{eid}")],
-        ])
+        rows = [top, row2, [btn("📍 Место", f"pl:{eid}"), btn("📆 В календарь телефона", f"ics:{eid}")]]
+        if e["due"]:
+            rows.append([rec_btn(e)])
+        rows.append([btn("📂 Раздел", f"mv:{eid}"), btn("🔄 Сменить тип", f"kind:{eid}")])
+        return markup(rows)
     row2 = [btn("📅 Изменить срок" if e["due"] else "📅 Задать срок", f"tp:{eid}:back")]
     if e["due"]:
         row2.append(btn("🔔 Напоминания", f"cfg:{eid}:t:main"))
-    return markup([
-        top, row2,
-        [btn("📋 Чек-лист", f"ck:{eid}:open"), btn("📂 Раздел", f"mv:{eid}")],
-        [btn("🔄 Сменить тип", f"kind:{eid}")],
-    ])
+    rows = [top, row2, [btn("📋 Чек-лист", f"ck:{eid}:open"), btn("📂 Раздел", f"mv:{eid}")]]
+    if e["due"]:
+        rows.append([rec_btn(e)])
+    rows.append([btn("🔄 Сменить тип", f"kind:{eid}")])
+    return markup(rows)
 
 
 def kb_remind(e):
@@ -124,6 +131,10 @@ def kb_remind(e):
 def item_response(e, tz, prefix=""):
     """Карточка + подсказка «что дальше». Мероприятие без времени сразу ведёт к выбору времени."""
     if e["kind"] == "event" and not e["due"] and not e["done"]:
+        hint = e.pop("day_hint", None)
+        if hint:
+            text, mk = picker_hours(e, tz, parse_day(hint))
+            return ((prefix + "\n\n" + text) if prefix else text), mk
         return picker_days(e, tz, prefix)
     head = prefix + "\n\n" if prefix else ""
     hint = next_hint(e, tz)
@@ -213,6 +224,7 @@ def picker_minutes(e, tz, day, hour):
 def settings_kb():
     return markup([
         [btn("📅 Мероприятия", "cfg:0:e:main"), btn("📝 Задачи", "cfg:0:t:main")],
+        [btn("☀️ Утренняя сводка", "cfg:0:d:main")],
         [btn("👌 Закрыть", "cfg:0:e:close")],
     ])
 
@@ -257,7 +269,7 @@ def cfg_screen(uid, e, kind, scr):
         row.append(btn(f"✅ {rep} ч (изменить)" if custom else "✍️ Своё", f"cfg:{eid}:t:rx"))
         rows = chunk(row, 4)
         rows.append([back])
-        return (head + "🔁 Повторять напоминание, пока не нажмёшь «Готово»?\n"
+        return (head + "🔁 Напоминать снова, пока не нажмёшь «Готово»?\n"
                 f"Выбери, как часто. Минимум 1 ч, не больше {MAX_NAGS} раз."), markup(rows)
 
     summary = ", ".join(TK_LABELS[o] for o in sorted(offs, reverse=True)) or "не напоминать"
@@ -268,13 +280,68 @@ def cfg_screen(uid, e, kind, scr):
     rows = [
         [btn(f"🔔 Когда: {summary}", f"cfg:{eid}:t:so")],
         time_row,
-        [btn("🔁 Повтор: " + (f"каждые {rep} ч" if rep else "выкл"), f"cfg:{eid}:t:sr")],
+        [btn("🔁 Напоминать снова: " + (f"каждые {rep} ч" if rep else "выкл"), f"cfg:{eid}:t:sr")],
         [close],
     ]
     intro = ("👇 Выбери, что поменять" if e else
              "📝 Напоминания о задачах\n\nУ задачи есть срок: дата и время. Я напомню в момент срока и заранее. "
-             "С повтором буду напоминать снова и снова, пока не нажмёшь «Готово».\n\nВыбери, что настроить:")
+             "Если включить «Напоминать снова», буду повторять напоминание, пока не нажмёшь «Готово».\n\nВыбери, что настроить:")
     return head + intro, markup(rows)
+
+
+# ---------- повтор дела ----------
+
+def rec_view(e, tz):
+    rec = e.get("rec")
+    t = rec["t"] if rec else None
+    wd = sorted(rec.get("wd") or []) if rec and rec["t"] == "w" else []
+    n = rec.get("n", 1) if rec else 1
+    eid = e["id"]
+
+    def mark(on):
+        return "✅ " if on else ""
+
+    rows = [
+        [btn(mark(not rec) + "Не повторять", f"rc:{eid}:s:off")],
+        [btn(mark(t == "d" and n == 1) + "Каждый день", f"rc:{eid}:s:d"),
+         btn(mark(wd == [0, 1, 2, 3, 4] and n == 1) + "По будням", f"rc:{eid}:s:wd")],
+        [btn(mark(t == "w" and wd != [0, 1, 2, 3, 4] and n == 1) + "Каждую неделю", f"rc:{eid}:s:wk"),
+         btn(mark(t == "m") + "Каждый месяц", f"rc:{eid}:s:m")],
+        [btn(mark(t == "y") + "Каждый год", f"rc:{eid}:s:y"), btn("📆 Дни недели", f"rc:{eid}:days")],
+        [btn("✍️ Каждые N дней", f"rc:{eid}:n")],
+        [btn("◀️ Назад", f"rc:{eid}:back")],
+    ]
+    text = (card(e, tz) + "\n\n♻️ Повторение\nКак часто повторять это дело? Следующий раз я назначу сам: "
+            "у задачи после «Готово», у мероприятия когда оно закончится. Время суток сохраняется.")
+    return text, markup(rows)
+
+
+def rec_days_view(e, tz):
+    rec = e.get("rec")
+    wd = set(rec.get("wd") or []) if rec and rec["t"] == "w" else set()
+    eid = e["id"]
+    btns_ = [btn(("✅ " if i in wd else "▫️ ") + WD[i], f"rc:{eid}:t{i}") for i in range(7)]
+    rows = chunk(btns_, 4) + [[btn("◀️ Назад", f"rc:{eid}:menu")]]
+    return (card(e, tz) + "\n\n📆 Выбери дни недели, в которые дело повторяется (можно несколько)."), markup(rows)
+
+
+def digest_screen(uid, scr):
+    d = get_set(uid)["digest"]
+    if scr == "sh":
+        rows = chunk([btn(("✅ " if h == d["hour"] else "") + f"{h:02d}:00", f"cfg:0:d:h{h}") for h in range(24)], 4)
+        rows.append([btn("◀️ Назад", "cfg:0:d:main")])
+        return "🕘 Во сколько присылать утреннюю сводку? Выбери час (формат 24 ч).", markup(rows)
+    state = f"включена, приходит в {d['hour']:02d}:00" if d["on"] else "выключена"
+    text = ("☀️ Утренняя сводка\n\nКаждое утро я пришлю одно сообщение: что у тебя сегодня "
+            "(мероприятия, задачи со сроком и сколько просрочено). Если дел нет, я не пишу.\n\n"
+            f"Сейчас: {state}.")
+    rows = [
+        [btn("🔕 Выключить" if d["on"] else "🔔 Включить", f"cfg:0:d:{'off' if d['on'] else 'on'}")],
+        [btn(f"🕘 Время: {d['hour']:02d}:00", "cfg:0:d:sh")],
+        [btn("👀 Показать сейчас", "cfg:0:d:now")],
+        [btn("◀️ Назад", "cfg:0:e:hub")],
+    ]
+    return text, markup(rows)
 
 
 # ---------- чек-лист ----------
@@ -503,6 +570,12 @@ def draft_view(did, tz):
     lines = ["🤔 Что это?", "", f"«{d['title']}»"]
     if d["due"]:
         lines.append("🕐 Нашёл время: " + fmt_time(d["due"], tz))
+    elif d.get("day"):
+        lines.append("🗓 Нашёл дату: " + fmt_day(parse_day(d["day"])) + " (время не указано)")
+    if d.get("rec"):
+        lines.append("♻️ Нашёл повтор: " + rec_text(d["rec"]))
+    if d.get("past"):
+        lines.append("⚠️ Названная дата уже прошла, поэтому я её не учёл.")
     if d["place"]:
         lines.append("📍 " + str(d["place"]))
     lines += [
@@ -610,7 +683,15 @@ async def help_cmd(m: Message):
         "• по желанию «📆 В календарь телефона» пришлёт файл, чтобы добавить его в календарь на телефоне\n\n"
         "🔴 Просроченное: задачи с прошедшим сроком и закончившиеся мероприятия собраны в «📋 Мои дела» → «🔴 Просрочено». Там их можно быстро отметить выполненными или удалить.\n\n"
         "🗓 Календарь: все дела по дням. Нажми на число, чтобы увидеть день и добавить в него дело.\n\n"
-        "👤 Профиль: твоя статистика, настройки и кнопка, чтобы стереть свои данные.\n\n"
+        "♻️ Повторы: пиши «каждый понедельник в 18:00 планерка», «по будням в 8:30», «каждый месяц 5 числа» "
+        "или нажми «♻️ Повторять дело» на карточке.\n\n"
+        "☀️ Утренняя сводка: включается в «🔔 Напоминания», приходит раз в день.\n\n"
+        "Как писать дату и время:\n"
+        "• 2.10 (этот год, а если дата уже прошла, то следующий), 2.8.26, 2 октября, 5 числа\n"
+        "• вт, пятница, завтра, через 3 д\n"
+        "• 18:30, 18 23, в 7 вечера, через 40 м\n"
+        "• название, дату и время можно писать отдельными строками\n\n"
+        "👤 Профиль: твоя статистика, тариф и кнопка, чтобы стереть свои данные.\n\n"
         "Разделы («Работа», «Дом» и так далее) создаются отдельно для задач и мероприятий в «📋 Мои дела»."
     )
 
@@ -661,6 +742,120 @@ async def profile_cmd(m: Message):
     await m.answer(profile_text(m.from_user.id), reply_markup=profile_kb())
 
 
+def pro_kb(uid):
+    plan = plan_of(uid)
+    if plan == "admin":
+        return None
+    return markup([[btn(f"⭐ {'Продлить' if plan == 'pro' else 'Купить'} Pro за {PRO_PRICE} ⭐", "pro:buy")]])
+
+
+@dp.message(Command("pro"))
+async def pro_cmd(m: Message):
+    if await guard(m):
+        return
+    await m.answer(plan_text(m.from_user.id), reply_markup=pro_kb(m.from_user.id))
+
+
+@dp.message(Command("id"))
+async def id_cmd(m: Message):
+    await m.answer(f"Твой Telegram ID: {m.from_user.id}\n\nЧтобы стать администратором бота, добавь это число "
+                   "в переменную ADMIN_IDS на хостинге (несколько ID через запятую) и перезапусти бота.")
+
+
+@dp.message(Command("paysupport"))
+async def paysupport_cmd(m: Message):
+    who = f" {SUPPORT}" if SUPPORT else " бота"
+    await m.answer("💬 Поддержка по оплате\n\nЕсли платёж не прошёл, Pro не включился или нужен возврат, "
+                   f"напиши администратору{who}. Укажи, когда и сколько ⭐ ты платил.")
+
+
+@dp.pre_checkout_query()
+async def pre_checkout(q: PreCheckoutQuery):
+    await q.answer(ok=True)
+
+
+@dp.message(F.successful_payment)
+async def paid(m: Message):
+    pay = m.successful_payment
+    uid = m.from_user.id
+    until = grant_pro(uid, PRO_DAYS)
+    PAYMENTS.append({"uid": uid, "amount": pay.total_amount, "charge": pay.telegram_payment_charge_id,
+                     "ts": int(time.time())})
+    await m.answer(f"✅ Спасибо! Pro включён до {datetime.fromtimestamp(until, zone(get_tz(uid))):%d.%m.%Y}.\n\n"
+                   "Лимиты уже расширены. Посмотреть тариф можно в /pro или в профиле.")
+
+
+def admin_only(m):
+    return m.from_user.id in ADMIN_IDS
+
+
+@dp.message(Command("admin"))
+@dp.message(Command("stats"))
+async def admin_cmd(m: Message):
+    if not admin_only(m):
+        return
+    st = stats()
+    await m.answer(
+        "👑 Администратор\n\n"
+        f"Пользователей: {st['users']}\nАктивных дел: {st['items']}\nВыполненных: {st['done']}\n"
+        f"Подписчиков Pro: {st['pro']}\nОплат: {st['payments']} (всего {st['stars']} ⭐)\n\n"
+        "Команды:\n/grant ID [дни]: выдать Pro\n/revoke ID: забрать Pro\n/backup: прислать копию базы\n"
+        "Чтобы восстановить данные, пришли мне файл копии (.db).")
+
+
+@dp.message(Command("grant"))
+async def grant_cmd(m: Message):
+    if not admin_only(m):
+        return
+    parts = (m.text or "").split()
+    try:
+        target = int(parts[1])
+        days = int(parts[2]) if len(parts) > 2 else PRO_DAYS
+    except (IndexError, ValueError):
+        await m.answer("Формат: /grant ID [дни]. Например: /grant 123456789 30")
+        return
+    until = grant_pro(target, days)
+    await m.answer(f"✅ Pro для {target} до {datetime.fromtimestamp(until, zone(get_tz(target))):%d.%m.%Y}")
+    try:
+        await m.bot.send_message(target, f"🎁 Тебе выдан Pro на {days} дн. Лимиты расширены. Подробнее: /pro")
+    except Exception:
+        pass
+
+
+@dp.message(Command("revoke"))
+async def revoke_cmd(m: Message):
+    if not admin_only(m):
+        return
+    parts = (m.text or "").split()
+    try:
+        target = int(parts[1])
+    except (IndexError, ValueError):
+        await m.answer("Формат: /revoke ID")
+        return
+    await m.answer("✅ Pro забран" if revoke_pro(target) else "У этого человека не было Pro")
+
+
+@dp.message(Command("backup"))
+async def backup_cmd(m: Message):
+    if not admin_only(m):
+        return
+    await send_backup(m.bot, m.from_user.id)
+
+
+@dp.message(F.document)
+async def on_document(m: Message):
+    """Администратор присылает файл копии (.db), и бот восстанавливает из него данные."""
+    if not admin_only(m) or not (m.document.file_name or "").endswith(".db"):
+        return
+    buf = await m.bot.download(m.document)
+    if storage.import_bytes(buf.read()):
+        restore(storage.load())
+        st = stats()
+        await m.answer(f"✅ Данные восстановлены из копии. Пользователей: {st['users']}, активных дел: {st['items']}.")
+    else:
+        await m.answer("Этот файл не похож на копию базы бота, ничего не изменил.")
+
+
 @dp.message(Command("settings"))
 @dp.message(F.text == B_REM)
 async def settings(m: Message):
@@ -695,8 +890,25 @@ async def tz_cmd(m: Message):
 
 # ---------- текстовые сообщения ----------
 
+def limit_message(ex):
+    tail = ("\n\n💎 Pro снимает эти ограничения. Подробнее: /pro" if ex.plan == "free"
+            else "\n\nЭто максимум тарифа Pro.")
+    return f"⚠️ {ex}{tail}"
+
+
+def limit_kb(ex):
+    return markup([[btn("💎 Что даёт Pro", "pro:info")]]) if ex.plan == "free" else None
+
+
 @dp.message(F.text)
 async def on_text(m: Message):
+    try:
+        await handle_text(m)
+    except LimitError as ex:
+        await m.answer(limit_message(ex), reply_markup=limit_kb(ex))
+
+
+async def handle_text(m: Message):
     uid = m.from_user.id
     touch_user(uid, getattr(m.from_user, "first_name", None))
     text = m.text.strip()
@@ -725,12 +937,11 @@ async def on_text(m: Message):
             if st.get("day"):
                 await add_on_day(m, text, st, tz)
                 return
-            title, due = text, None
-            loc = safe_local(text, tz) if len(text) < 200 else None
-            if loc:
-                title, due = loc
-            e = add_item(uid, st["kind"], title[:200], due, sec=st["sec"])
-            resp, mk = item_response(e, tz, saved_title(e))
+            info = parse_text(text, tz) if len(text) < 200 else {
+                "title": text[:200], "due": None, "day": None, "rec": None, "past": False}
+            e = create_item(uid, st["kind"], info["title"][:200], info["due"], info["day"], info["rec"], st["sec"])
+            note = "⚠️ Названная дата уже прошла, поэтому я её не учёл.\n\n" if info["past"] else ""
+            resp, mk = item_response(e, tz, note + saved_title(e))
             await m.answer(resp, reply_markup=mk)
             return
 
@@ -761,12 +972,11 @@ async def on_text(m: Message):
             e = find(st["eid"], uid)
             if not e:
                 return
-            ts = parse_when(text, tz)
-            if ts is None:
-                loc = safe_local(text, tz)
-                ts = loc[1] if loc else None
-            if ts is not None and e["kind"] == "task" and not has_explicit_time(text):
-                ts = task_ts(datetime.fromtimestamp(ts, zone(tz)).date(), uid, tz)
+            info = parse_text(text, tz)
+            ts = info["due"]
+            if ts is None and info["day"]:
+                ts = (task_ts(info["day"], uid, tz) if e["kind"] == "task"
+                      else int(datetime.combine(info["day"], dtime(9, 0), tzinfo=zone(tz)).timestamp()))
             if ts is None or ts <= time.time():
                 STATE[uid] = st
                 hint = ("• завтра\n• 25.10\n• через 3 д" if e["kind"] == "task" else
@@ -789,7 +999,7 @@ async def on_text(m: Message):
                 return
             if st["eid"] == 0:
                 get_set(uid)["repeat"] = n
-                await m.answer(f"✅ Повтор для задач по умолчанию: каждые {n} ч, пока не нажмёшь «Готово». "
+                await m.answer(f"✅ Напоминать снова: каждые {n} ч, пока не нажмёшь «Готово». "
                                "Он будет у новых задач. У старых его можно поменять на их карточках.")
             else:
                 e = find(st["eid"], uid)
@@ -797,8 +1007,24 @@ async def on_text(m: Message):
                     e["repeat"] = n
                     e["nags"] = 0
                     e["nag_at"] = None
-                    resp, mk = time_response(e, tz, "Повтор настроен")
+                    resp, mk = time_response(e, tz, "Повторное напоминание настроено")
                     await m.answer(resp, reply_markup=mk)
+            return
+
+        if t == "rec_n":
+            e = find(st["eid"], uid)
+            digits = re.sub(r"\D", "", text)
+            n = int(digits) if digits else 0
+            if not 1 <= n <= 365:
+                STATE[uid] = st
+                await m.answer("⚠️ Напиши число дней от 1 до 365, например 3.")
+                return
+            if e:
+                if not e.get("rec"):
+                    check_limit(uid, "recurring", count_recurring(uid))
+                set_rec(e, {"t": "d", "n": n}, tz)
+                resp, mk = time_response(e, tz, "Повтор настроен")
+                await m.answer(resp, reply_markup=mk)
             return
 
         if t == "place":
@@ -828,7 +1054,7 @@ async def add_on_day(m, text, st, tz):
     uid = m.from_user.id
     z = zone(tz)
     day = parse_day(st["day"])
-    ex = extract_time(text)
+    ex = extract_time(text, tz)
     title, due, note = text, None, ""
     if ex:
         title, hh, mm = ex
@@ -885,11 +1111,8 @@ async def handle_free_text(m, text, force_ai=False):
     use_ai = force_ai or url_match or len(text) >= 200
 
     if not use_ai:
-        title, due = text, None
-        loc = safe_local(text, tz)
-        if loc:
-            title, due = loc
-        did = new_draft(uid, title[:200], due)
+        info = parse_text(text, tz)
+        did = new_draft(uid, info["title"][:200], info["due"], day=info["day"], rec=info["rec"], past=info["past"])
         dtext, mk = draft_view(did, tz)
         await m.answer(dtext, reply_markup=mk)
         return
@@ -909,7 +1132,9 @@ async def handle_free_text(m, text, force_ai=False):
         if ai_allowed(uid):
             items = await ask_llm(source, tz)
         else:
-            await m.answer("Лимит разбора ИИ на сегодня закончился. Напиши коротко с датой, например «завтра в 18:00».")
+            ex = LimitError(f"Достигнут лимит: {limit(uid, 'ai')} {LIMIT_WORDS['ai']}. "
+                            "Напиши коротко с датой, например «завтра в 18:00».", "ai", plan_of(uid))
+            await m.answer(limit_message(ex), reply_markup=limit_kb(ex))
             return
     elif url_match:
         await m.answer("Разбор ссылок пока выключен. Скинь текст мероприятия сообщением.")
@@ -918,13 +1143,11 @@ async def handle_free_text(m, text, force_ai=False):
     drafts = []
     for it in (items or [])[:10]:
         if it.get("title"):
-            drafts.append((str(it["title"])[:200], to_ts(it.get("datetime"), tz), it.get("place"), it.get("note")))
+            drafts.append((str(it["title"])[:200], to_ts(it.get("datetime"), tz), it.get("place"), it.get("note"), None, None))
     if not drafts:
-        title, due = text[:200], None
-        loc = safe_local(text, tz) if len(text) < 200 else None
-        if loc:
-            title, due = loc[0][:200], loc[1]
-        drafts = [(title, due, None, None)]
+        info = parse_text(text, tz) if len(text) < 200 else {
+            "title": text[:200], "due": None, "day": None, "rec": None, "past": False}
+        drafts = [(info["title"][:200], info["due"], None, None, info["day"], info["rec"])]
 
     if len(drafts) == 1:
         did = new_draft(uid, *drafts[0])
@@ -934,7 +1157,7 @@ async def handle_free_text(m, text, force_ai=False):
 
     await m.answer(f"🤖 Нашёл дел: {len(drafts)}. Сохраняю все. Тип определил сам: "
                    "со временем это мероприятие, без времени задача. Любое можно поменять кнопкой «🔄 Сменить тип» на карточке.")
-    for title, due, place, note in drafts:
+    for title, due, place, note, *_ in drafts:
         e = add_item(uid, "event" if due else "task", title, due, place, note)
         await m.answer(saved_title(e) + "\n\n" + card(e, tz), reply_markup=kb(e))
 
@@ -945,6 +1168,12 @@ async def handle_free_text(m, text, force_ai=False):
 async def on_cb(c: CallbackQuery):
     try:
         await dispatch(c)
+    except LimitError as ex:
+        try:
+            await c.message.answer(limit_message(ex), reply_markup=limit_kb(ex))
+            await c.answer()
+        except Exception:
+            pass
     except Exception:
         logging.exception("callback error: %s", c.data)
         try:
@@ -953,7 +1182,7 @@ async def on_cb(c: CallbackQuery):
             pass
 
 
-ITEM_CMDS = ("open", "done", "undo", "del", "kind", "mv", "mvs", "mvn", "back", "tp", "snz", "pl", "ics", "ck")
+ITEM_CMDS = ("open", "done", "undo", "del", "kind", "mv", "mvs", "mvn", "back", "tp", "snz", "pl", "ics", "ck", "rc")
 
 
 async def dispatch(c: CallbackQuery):
@@ -1013,6 +1242,22 @@ async def dispatch(c: CallbackQuery):
             await safe_edit(msg, "✅ Данные стёрты\n\n" + profile_text(uid), profile_kb())
         else:  # back
             await safe_edit(msg, profile_text(uid), profile_kb())
+        await c.answer()
+        return
+
+    # --- тариф Pro ---
+    if cmd == "pro":
+        if p[1] == "info":
+            await msg.answer(plan_text(uid), reply_markup=pro_kb(uid))
+        elif p[1] == "buy":
+            if plan_of(uid) == "admin":
+                await c.answer("Администратору покупка не нужна", show_alert=True)
+                return
+            await msg.bot.send_invoice(
+                chat_id=uid, title=f"Pro на {PRO_DAYS} дн.",
+                description="Больше дел, разделов, повторяющихся дел и разборов текста ИИ.",
+                payload=f"pro:{uid}", provider_token="", currency="XTR",
+                prices=[LabeledPrice(label="Pro", amount=PRO_PRICE)])
         await c.answer()
         return
 
@@ -1196,6 +1441,12 @@ async def dispatch(c: CallbackQuery):
     if cmd == "open":
         await msg.answer(card(e, tz), reply_markup=kb(e))
     elif cmd == "done":
+        if e.get("rec") and e["due"]:  # повторяющееся дело: сразу назначаем следующий раз
+            roll_item(e, tz)
+            await safe_edit(msg, f"✅ Выполнено на этот раз\n\nЭто повторяющееся дело ({rec_text(e['rec'])}). "
+                                 f"Следующий раз: {fmt_time(e['due'], tz)}.\n\n" + card(e, tz), kb(e))
+            await c.answer("Готово! Следующий раз назначен")
+            return
         e["done"] = True
         await safe_edit(msg, f"✅ Выполнено\n\n«{e['title']}» отмечено как сделанное. Найти его можно в "
                              "«📋 Мои дела» → «✅ Выполненные», оттуда его можно вернуть в список.", None)
@@ -1272,6 +1523,77 @@ async def dispatch(c: CallbackQuery):
     elif cmd == "ck":
         await check_cb(c, e, p[2])
         return
+    elif cmd == "rc":
+        await rec_cb(c, e, p[2:])
+        return
+    await c.answer()
+
+
+async def rec_cb(c, e, args):
+    """Кнопки повторения дела."""
+    uid = c.from_user.id
+    tz = get_tz(uid)
+    msg = c.message
+    act = args[0]
+    if act == "menu":
+        text, mk = rec_view(e, tz)
+    elif act == "s":
+        code = args[1]
+        presets = {"d": {"t": "d", "n": 1}, "wd": {"t": "w", "n": 1, "wd": [0, 1, 2, 3, 4]},
+                   "wk": {"t": "w", "n": 1}, "m": {"t": "m", "n": 1}, "y": {"t": "y", "n": 1}}
+        if code == "off":
+            e["rec"] = None
+        else:
+            if not e.get("rec"):
+                check_limit(uid, "recurring", count_recurring(uid))
+            set_rec(e, presets[code], tz)
+        text, mk = rec_view(e, tz)
+    elif act == "days":
+        text, mk = rec_days_view(e, tz)
+    elif re.fullmatch(r"t[0-6]", act):
+        if not e.get("rec"):
+            check_limit(uid, "recurring", count_recurring(uid))
+        cur = set(e["rec"].get("wd") or []) if e.get("rec") and e["rec"]["t"] == "w" else set()
+        cur ^= {int(act[1:])}
+        e["rec"] = {"t": "w", "n": 1, "wd": sorted(cur)} if cur else None
+        text, mk = rec_days_view(e, tz)
+    elif act == "n":
+        STATE[uid] = {"type": "rec_n", "eid": e["id"]}
+        await msg.answer("✍️ Напиши, через сколько дней повторять дело (число от 1 до 365), например 3.")
+        await c.answer()
+        return
+    else:  # back
+        text, mk = card(e, tz), kb(e)
+    await safe_edit(msg, text, mk)
+    await c.answer()
+
+
+async def digest_cb(c, act):
+    """Кнопки утренней сводки."""
+    uid = c.from_user.id
+    msg = c.message
+    d = get_set(uid)["digest"]
+    if act == "hub":
+        await safe_edit(msg, SETTINGS_TEXT, settings_kb())
+        await c.answer()
+        return
+    if act == "now":
+        text = digest_text(uid)
+        await msg.answer(text or "☀️ На сегодня дел нет, поэтому сводка была бы пустой. Утром я в таком случае не пишу.")
+        await c.answer()
+        return
+    scr = "main"
+    if act in ("on", "off"):
+        digest_set_on(uid, act == "on")
+    elif act == "sh":
+        scr = "sh"
+    elif re.fullmatch(r"h\d+", act):
+        d["hour"] = min(max(int(act[1:]), 0), 23)
+        if d["on"]:
+            digest_set_on(uid, True)
+        scr = "sh"
+    text, mk = digest_screen(uid, scr)
+    await safe_edit(msg, text, mk)
     await c.answer()
 
 
@@ -1414,6 +1736,9 @@ async def cfg_cb(c, eid, k, act):
     z = zone(tz)
     msg = c.message
     s = get_set(uid)
+    if k == "d":
+        await digest_cb(c, act)
+        return
     e = None
     if eid:
         e = find(eid, uid)
@@ -1512,6 +1837,9 @@ async def tick(bot):
         if e["done"]:
             continue
         tzname = get_tz(e["user_id"])
+        if e["kind"] == "event" and e.get("rec") and e["due"] and e["due"] + EVENT_MIN * 60 < now:
+            roll_item(e, tzname)  # мероприятие закончилось: ставим следующее повторение
+            continue
         if e.get("snooze") and now >= e["snooze"]:
             e["snooze"] = None
             await send_safe(bot, e["user_id"], "⏰ Напоминаю ещё раз\n\n" + card(e, tzname) + FOOTER, kb_remind(e))
@@ -1534,18 +1862,75 @@ async def tick(bot):
                                 "🔁 Ещё не отмечено «Готово»\n\n" + card(e, tzname) + FOOTER, kb_remind(e))
 
 
+async def send_digests(bot):
+    for uid in list(USER_SET):
+        if digest_due(uid):
+            now = datetime.now(zone(get_tz(uid)))
+            get_set(uid)["digest"]["last"] = ymd(now.date())
+            text = digest_text(uid)
+            if text:
+                await send_safe(bot, uid, text, markup([[btn("🗓 Открыть день", f"cd:{ymd(now.date())}")]]))
+
+
+_last_saved = None
+
+
+async def save_if_changed():
+    """Сохраняет данные в базу, если они изменились с прошлого раза."""
+    global _last_saved
+    snap = snapshot()
+    blob = json.dumps(snap, sort_keys=True, ensure_ascii=False)
+    if blob != _last_saved:
+        await asyncio.to_thread(storage.save, snap)
+        _last_saved = blob
+
+
+async def persist_loop():
+    while True:
+        await asyncio.sleep(10)
+        try:
+            await save_if_changed()
+        except Exception:
+            logging.exception("save error")
+
+
+async def send_backup(bot, uid):
+    await save_if_changed()
+    data = await asyncio.to_thread(storage.export_bytes)
+    name = f"backup_{datetime.now():%Y-%m-%d_%H%M}.db"
+    await bot.send_document(uid, BufferedInputFile(data, filename=name),
+                            caption="💾 Копия базы. Если данные пропадут, пришли этот файл мне, и я восстановлю всё.")
+
+
+async def backup_loop(bot):
+    while True:
+        await asyncio.sleep(24 * 3600)
+        for uid in ADMIN_IDS:
+            try:
+                await send_backup(bot, uid)
+            except Exception:
+                logging.exception("backup error")
+
+
 async def reminder_loop(bot):
     while True:
         try:
             await tick(bot)
+            await send_digests(bot)
         except Exception:
             logging.exception("reminder error")
         await asyncio.sleep(20)
 
 
 async def main():
+    global _last_saved
     if not TOKEN:
         raise SystemExit("Не задана переменная BOT_TOKEN")
+    state = storage.load()
+    if state:
+        restore(state)
+        logging.info("Данные загружены: дел %d, пользователей %d", len(ITEMS), len(USER_TZ))
+    _last_saved = json.dumps(snapshot(), sort_keys=True, ensure_ascii=False)
     bot = Bot(TOKEN)
     try:
         await bot.set_my_commands([
@@ -1555,17 +1940,26 @@ async def main():
             BotCommand(command="list", description="Мои дела и разделы"),
             BotCommand(command="calendar", description="Календарь по дням"),
             BotCommand(command="profile", description="Профиль и статистика"),
+            BotCommand(command="pro", description="Тариф Pro"),
             BotCommand(command="settings", description="Напоминания"),
             BotCommand(command="tz", description="Часовой пояс"),
             BotCommand(command="help", description="Помощь"),
+            BotCommand(command="paysupport", description="Поддержка по оплате"),
         ])
     except Exception:
         pass
-    reminders = asyncio.create_task(reminder_loop(bot))
+    tasks = [asyncio.create_task(reminder_loop(bot)), asyncio.create_task(persist_loop())]
+    if ADMIN_IDS:
+        tasks.append(asyncio.create_task(backup_loop(bot)))
     try:
         await dp.start_polling(bot)
     finally:
-        reminders.cancel()
+        for t in tasks:
+            t.cancel()
+        try:
+            storage.save(snapshot())  # последнее сохранение при остановке
+        except Exception:
+            logging.exception("final save error")
 
 
 if __name__ == "__main__":
