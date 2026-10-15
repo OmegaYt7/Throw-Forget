@@ -7,11 +7,13 @@ import calendar
 import ipaddress
 import itertools
 import json
+import logging
 import os
 import re
 import time
 from datetime import date, datetime, timedelta, timezone
 from datetime import time as dtime
+from html import unescape
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
@@ -48,6 +50,8 @@ MAX_REPEAT = 72
 MAX_NAGS = 12
 MAX_SECTIONS = 15
 MAX_CHECKS = 20
+DESC_MAX = {"event": 3000, "task": 1000}   # длина описания: у мероприятия больше, чем у задачи
+TITLE_MAX = 200
 EVENT_MIN = 60                              # мероприятие занимает 1 ч (для пересечений и календаря)
 WD = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 MONTHS = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
@@ -394,14 +398,14 @@ def reset_fired(e):
     e["fired"] = {o for o in e["offsets"] if e["due"] and e["due"] - o * 60 <= now}
 
 
-def add_item(uid, kind, title, due=None, place=None, note=None, sec=0, rec=None):
+def add_item(uid, kind, title, due=None, place=None, note=None, sec=0, rec=None, desc=None):
     check_limit(uid, "items", len(items_of(uid)))
     if rec:
         check_limit(uid, "recurring", count_recurring(uid))
     s = get_set(uid)
     task = kind == "task"
     e = {"id": next(_ids), "user_id": uid, "kind": kind, "title": title, "due": due,
-         "place": place, "note": note, "sec": sec, "done": False,
+         "place": place, "note": note, "sec": sec, "done": False, "desc": trim_desc(kind, desc),
          "offsets": list(s["tk_offsets"] if task else s["ev_offsets"]),
          "repeat": s["repeat"] if task else 0,
          "checks": [], "fired": set(), "nags": 0, "nag_at": None, "snooze": None, "rec": None}
@@ -468,7 +472,7 @@ def remind_text(e, tz):
     return ", ".join(parts) if parts else "без напоминаний"
 
 
-def card(e, tz):
+def card(e, tz, show_desc=False):
     z = zone(tz)
     event = e["kind"] == "event"
     lines = [("📅 " if event else "📝 ") + e["title"]]
@@ -509,6 +513,14 @@ def card(e, tz):
         lines += [("✅ " if c["d"] else "⬜️ ") + c["t"] for c in e["checks"][:10]]
     if e["done"]:
         lines.append("✅ Выполнено")
+    desc = e.get("desc") or ""
+    if desc:
+        if show_desc:
+            room = max(200, 3900 - len("\n".join(lines)) - 80)
+            shown = desc if len(desc) <= room else desc[:room].rsplit(" ", 1)[0] + "…"
+            lines += ["", f"📄 Описание ({len(desc)} симв.):", shown]
+        else:
+            lines.append(f"📄 Описание: {len(desc)} симв. Нажми «Показать описание».")
     return "\n".join(lines)
 
 
@@ -625,54 +637,223 @@ async def is_public(url):
         return False
 
 
+_META_KEYS = {"og:title", "og:description", "twitter:title", "twitter:description", "description"}
+
+
+def _decode(raw, charset):
+    cs = charset
+    if not cs:
+        m = re.search(rb"charset=[\"']?([\w-]+)", raw[:3000], re.I)
+        cs = m.group(1).decode("ascii", "ignore") if m else "utf-8"
+    try:
+        return raw.decode(cs, errors="replace")
+    except LookupError:
+        return raw.decode("utf-8", errors="replace")
+
+
+def page_text(html_):
+    """Текст страницы: сначала мета-теги (их отдают даже сайты на скриптах, вроде ВКонтакте), потом видимый текст."""
+    parts = []
+    t = re.search(r"<title[^>]*>(.*?)</title>", html_, re.I | re.S)
+    if t:
+        parts.append(unescape(" ".join(t.group(1).split())))
+    for tag in re.findall(r"<meta\b[^>]*>", html_, re.I):
+        key = re.search(r"(?:property|name)\s*=\s*[\"']([^\"']+)[\"']", tag, re.I)
+        val = re.search(r"content\s*=\s*\"([^\"]*)\"|content\s*=\s*'([^']*)'", tag, re.I)
+        if key and val and key.group(1).lower() in _META_KEYS:
+            v = unescape(" ".join((val.group(1) or val.group(2) or "").split()))
+            if v and v not in parts:
+                parts.append(v)
+    body = re.sub(r"(?is)<(script|style|noscript).*?>.*?</\1>", " ", html_)
+    body = unescape(re.sub(r"<[^>]+>", " ", body))
+    body = re.sub(r"\s+", " ", body).strip()
+    text = "\n".join(parts + ([body] if body else []))
+    return text[:5000]
+
+
 async def fetch_page(url):
+    """Текст страницы по ссылке или None, если прочитать не получилось (закрыта, пустая, нет связи)."""
     if not await is_public(url):
         return None
+    headers = {"User-Agent": "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/124.0 Mobile Safari/537.36",
+               "Accept-Language": "ru,en;q=0.8"}
     try:
-        timeout = aiohttp.ClientTimeout(total=10)
-        async with aiohttp.ClientSession(timeout=timeout, headers={"User-Agent": "Mozilla/5.0"}) as s:
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as s:
             async with s.get(url) as r:
                 if r.status != 200:
                     return None
-                raw = await r.content.read(300_000)
+                raw = await r.content.read(400_000)
+                charset = r.charset
     except Exception:
         return None
-    html = raw.decode("utf-8", errors="ignore")
-    html = re.sub(r"(?is)<(script|style|noscript).*?>.*?</\1>", " ", html)
-    text = re.sub(r"<[^>]+>", " ", html)
-    return re.sub(r"\s+", " ", text).strip()[:4000]
+    text = page_text(_decode(raw, charset))
+    return text if len(text.strip()) >= 80 else None
+
+
+class AIError(Exception):
+    """Понятная причина, почему ИИ не сработал."""
+
+
+GROQ_URL = "https://api.groq.com/openai/v1"
+_MODEL = {"id": None}
+_PREFERRED = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "openai/gpt-oss-20b", "openai/gpt-oss-120b",
+              "qwen/qwen3-32b", "meta-llama/llama-4-scout-17b-16e-instruct", "gemma2-9b-it"]
+_NOT_CHAT = ("whisper", "tts", "guard", "playai", "embed", "orpheus", "safeguard")
+
+
+def current_model():
+    return _MODEL["id"] or GROQ_MODEL
+
+
+def _pick_model(ids, exclude=None):
+    ids = [i for i in ids if i != exclude and not any(w in i.lower() for w in _NOT_CHAT)]
+    for p in _PREFERRED:
+        if p in ids:
+            return p
+    for i in ids:
+        if any(w in i.lower() for w in ("llama", "gpt-oss", "qwen", "gemma", "mixtral")):
+            return i
+    return None
+
+
+def _http_reason(status, data):
+    msg = ""
+    if isinstance(data, dict):
+        err = data.get("error")
+        msg = (err.get("message") if isinstance(err, dict) else str(err or ""))[:160]
+    hints = {401: "проверь GROQ_API_KEY", 403: "доступ запрещён (иногда так бывает из-за региона хостинга)",
+             404: "модель не найдена, проверь GROQ_MODEL", 429: "превышен лимит Groq, подожди немного"}
+    hint = hints.get(status) or ("сервис Groq временно недоступен" if status >= 500 else "")
+    return f"Groq вернул {status}" + (f": {msg}" if msg else "") + (f" ({hint})" if hint else "")
+
+
+async def _groq_post(session, model, system, user):
+    payload = {
+        "model": model,
+        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        "response_format": {"type": "json_object"},
+        "temperature": 0.1,
+        "max_tokens": 2000,
+    }
+    async with session.post(f"{GROQ_URL}/chat/completions", json=payload,
+                            headers={"Authorization": f"Bearer {GROQ_KEY}"}) as r:
+        try:
+            data = await r.json(content_type=None)
+        except Exception:  # noqa: BLE001
+            data = {"error": {"message": (await r.text())[:200]}}
+        return r.status, data
+
+
+async def _groq_models(session):
+    async with session.get(f"{GROQ_URL}/models", headers={"Authorization": f"Bearer {GROQ_KEY}"}) as r:
+        if r.status != 200:
+            return []
+        data = await r.json(content_type=None)
+        return [m.get("id") for m in data.get("data", []) if isinstance(m, dict) and m.get("id")]
+
+
+def _loads_json(content):
+    try:
+        return json.loads(content)
+    except Exception:  # noqa: BLE001
+        a, b = content.find("{"), content.rfind("}")
+        if a != -1 and b > a:
+            try:
+                return json.loads(content[a:b + 1])
+            except Exception:  # noqa: BLE001
+                pass
+    raise AIError("ИИ ответил не в формате JSON")
 
 
 async def ask_llm(text, tz):
+    """Просит ИИ выделить дела и мероприятия. Возвращает список словарей, при ошибке бросает AIError с причиной."""
     now = datetime.now(zone(tz)).strftime("%Y-%m-%d %H:%M, %A")
     system = (
-        "Ты помощник-планировщик. Из текста пользователя выдели задачи и события. "
+        "Ты помощник-планировщик. Из текста выдели дела и мероприятия, которые человеку нужно запланировать. "
         f"Сейчас {now}, часовой пояс {tz}. Отвечай ТОЛЬКО JSON такого вида: "
-        '{"items":[{"title":"коротко","datetime":"YYYY-MM-DDTHH:MM или null",'
-        '"place":"строка или null","note":"строка или null"}]}. '
-        "Если времени у дела нет, datetime = null. "
-        "Если дата есть, а времени нет, ставь 09:00. Ничего не выдумывай."
+        '{"items":[{"title":"коротко, до 80 символов","date":"YYYY-MM-DD или null","time":"HH:MM или null",'
+        '"place":"строка или null","description":"главное из текста (условия, цена, что взять, контакты), '
+        'до 700 символов, или null"}]}. '
+        "Год, если он не назван, выбирай так, чтобы дата была в будущем. Время не выдумывай: если его нет, time = null. "
+        "Если в тексте нет ни дел, ни мероприятий, верни {\"items\": []}."
     )
-    payload = {
-        "model": GROQ_MODEL,
-        "messages": [{"role": "system", "content": system},
-                     {"role": "user", "content": text[:6000]}],
-        "response_format": {"type": "json_object"},
-        "temperature": 0.1,
-    }
+    model = current_model()
     try:
-        timeout = aiohttp.ClientTimeout(total=30)
+        timeout = aiohttp.ClientTimeout(total=40)
         async with aiohttp.ClientSession(timeout=timeout) as s:
-            async with s.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                json=payload, headers={"Authorization": f"Bearer {GROQ_KEY}"},
-            ) as r:
-                if r.status != 200:
-                    return None
-                data = await r.json()
-        return json.loads(data["choices"][0]["message"]["content"]).get("items", [])
-    except Exception:
-        return None
+            status, data = await _groq_post(s, model, system, text[:6000])
+            if status in (400, 404) and "model" in json.dumps(data, ensure_ascii=False).lower():
+                new = _pick_model(await _groq_models(s), exclude=model)
+                if new:
+                    logging.warning("Модель %s недоступна, перехожу на %s", model, new)
+                    _MODEL["id"] = new
+                    status, data = await _groq_post(s, new, system, text[:6000])
+    except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as ex:
+        raise AIError(f"нет связи с Groq ({type(ex).__name__})") from ex
+    if status != 200:
+        raise AIError(_http_reason(status, data))
+    try:
+        content = data["choices"][0]["message"]["content"]
+    except Exception as ex:  # noqa: BLE001
+        raise AIError("Groq прислал ответ в неожиданном формате") from ex
+    obj = _loads_json(content)
+    items = obj.get("items") if isinstance(obj, dict) else obj
+    if not isinstance(items, list):
+        raise AIError("ответ ИИ в неожиданном формате")
+    return [it for it in items if isinstance(it, dict)]
+
+
+def ai_refund(uid):
+    """Если ИИ не сработал по его вине, попытку не списываем."""
+    d, n = AI_USED.get(uid, (date.today(), 0))
+    AI_USED[uid] = (d, max(0, n - 1))
+
+
+def ai_when(it, tz):
+    """Поля ИИ date и time -> (готовое время ts или None, дата без времени или None)."""
+    z = zone(tz)
+    d, tv = None, None
+    try:
+        d = date.fromisoformat(str(it.get("date"))[:10]) if it.get("date") else None
+    except Exception:  # noqa: BLE001
+        d = None
+    m = re.match(r"(\d{1,2}):(\d{2})", str(it.get("time") or ""))
+    if m and int(m.group(1)) <= 23 and int(m.group(2)) <= 59:
+        tv = (int(m.group(1)), int(m.group(2)))
+    if d is None and it.get("datetime"):  # старый формат ответа
+        ts = to_ts(it["datetime"], tz)
+        if ts:
+            dt = datetime.fromtimestamp(ts, z)
+            d, tv = dt.date(), (dt.hour, dt.minute)
+    if d and tv:
+        ts = int(datetime.combine(d, dtime(*tv), tzinfo=z).timestamp())
+        return (ts, None) if ts > time.time() else (None, None)
+    if d:
+        return None, (d if d >= datetime.now(z).date() else None)
+    return None, None
+
+
+def trim_desc(kind, text):
+    return (text or "").strip()[:DESC_MAX[kind]]
+
+
+def split_title_desc(text):
+    """Длинный текст -> (короткое название, полное описание)."""
+    t = text.strip()
+    lines = [ln.strip() for ln in t.splitlines() if ln.strip()]
+    title = lines[0] if lines else t
+    if len(title) > 90:
+        cut = re.split(r"(?<=[.!?])\s", title, maxsplit=1)[0]
+        title = cut if 10 <= len(cut) <= 90 else title[:90].rsplit(" ", 1)[0] + "…"
+    return title.strip(), t
+
+
+def analyze_long(text, tz):
+    """Длинный текст без ИИ: дата и время ищем сами, название берём из первой строки, весь текст уходит в описание."""
+    info = parse_text(text, tz)
+    title, desc = split_title_desc(text)
+    return {"title": title, "desc": desc, "due": info["due"], "day": info["day"], "rec": None, "past": info["past"]}
 
 
 def to_ts(value, tz):
@@ -689,24 +870,24 @@ def to_ts(value, tz):
 
 # ---------- черновики: «Что это: задача или мероприятие?» ----------
 
-def new_draft(uid, title, due, place=None, note=None, day=None, rec=None, past=False):
+def new_draft(uid, title, due, place=None, note=None, day=None, rec=None, past=False, desc="", warn=""):
     did = next(_dids)
     DRAFTS[did] = {"uid": uid, "title": title, "due": due, "place": place, "note": note, "kind": None,
-                   "day": ymd(day) if day else None, "rec": rec, "past": past}
+                   "day": ymd(day) if day else None, "rec": rec, "past": past, "desc": desc, "warn": warn}
     return did
 
 
 def finalize_draft(did, sid):
     d = DRAFTS[did]  # удаляем черновик только после успеха: при лимите его можно сохранить позже
     e = create_item(d["uid"], d["kind"], d["title"], d["due"], d.get("day"), d.get("rec"), sid,
-                    d["place"], d["note"])
+                    d["place"], d["note"], d.get("desc"))
     DRAFTS.pop(did, None)
     return e
 
 
-def create_item(uid, kind, title, due, day, rec, sec=0, place=None, note=None):
+def create_item(uid, kind, title, due, day, rec, sec=0, place=None, note=None, desc=None):
     """Создаёт дело. Если известна только дата: задаче ставим срок по умолчанию, у мероприятия запомним день для выбора часа."""
-    e = add_item(uid, kind, title, due, place, note, sec, rec)
+    e = add_item(uid, kind, title[:TITLE_MAX], due, place, note, sec, rec, desc)
     if due is None and day:
         d = parse_day(day) if isinstance(day, str) else day
         if kind == "task":
@@ -1365,6 +1546,7 @@ def restore(state):
         e["fired"] = set(e.get("fired", []))
         e.setdefault("rec", None)
         e.setdefault("checks", [])
+        e.setdefault("desc", "")
         ITEMS.append(e)
     SECTIONS[:] = [dict(s) for s in state.get("sections", [])]
     for target, key in ((USER_TZ, "user_tz"), (USER_SET, "user_set"), (USER_META, "user_meta"), (PLANS, "plans")):
