@@ -97,7 +97,22 @@ def rec_btn(e):
     return btn(label[:40], f"rc:{e['id']}:menu")
 
 
-def kb(e):
+def rec_btn(e):
+    label = "♻️ " + (rec_text(e["rec"]) if e.get("rec") else "Повторять дело")
+    return btn(label[:40], f"rc:{e['id']}:menu")
+
+
+def desc_row(e, opened):
+    eid = e["id"]
+    if not e.get("desc"):
+        return [btn("📄 Добавить описание", f"dc:{eid}:edit")]
+    if opened:
+        return [btn("🙈 Скрыть", f"dc:{eid}:hide"), btn("✏️ Изменить", f"dc:{eid}:edit"),
+                btn("🧹 Убрать", f"dc:{eid}:clr")]
+    return [btn(f"📄 Показать описание ({len(e['desc'])})", f"dc:{eid}:show")]
+
+
+def kb(e, desc_open=False):
     eid = e["id"]
     if e["done"]:
         return markup([[btn("↩️ Вернуть", f"undo:{eid}"), btn("🗑 Удалить", f"del:{eid}")]])
@@ -106,7 +121,8 @@ def kb(e):
         row2 = [btn("🕐 Изменить время" if e["due"] else "🕐 Задать время", f"tp:{eid}:back")]
         if e["due"]:
             row2.append(btn("🔔 Напоминания", f"cfg:{eid}:e:main"))
-        rows = [top, row2, [btn("📍 Место", f"pl:{eid}"), btn("📆 В календарь телефона", f"ics:{eid}")]]
+        rows = [top, row2, desc_row(e, desc_open),
+                [btn("📍 Место", f"pl:{eid}"), btn("📆 В календарь телефона", f"ics:{eid}")]]
         if e["due"]:
             rows.append([rec_btn(e)])
         rows.append([btn("📂 Раздел", f"mv:{eid}"), btn("🔄 Сменить тип", f"kind:{eid}")])
@@ -114,7 +130,7 @@ def kb(e):
     row2 = [btn("📅 Изменить срок" if e["due"] else "📅 Задать срок", f"tp:{eid}:back")]
     if e["due"]:
         row2.append(btn("🔔 Напоминания", f"cfg:{eid}:t:main"))
-    rows = [top, row2, [btn("📋 Чек-лист", f"ck:{eid}:open"), btn("📂 Раздел", f"mv:{eid}")]]
+    rows = [top, row2, desc_row(e, desc_open), [btn("📋 Чек-лист", f"ck:{eid}:open"), btn("📂 Раздел", f"mv:{eid}")]]
     if e["due"]:
         rows.append([rec_btn(e)])
     rows.append([btn("🔄 Сменить тип", f"kind:{eid}")])
@@ -578,10 +594,18 @@ def draft_view(did, tz):
         lines.append("⚠️ Названная дата уже прошла, поэтому я её не учёл.")
     if d["place"]:
         lines.append("📍 " + str(d["place"]))
+    if d.get("desc"):
+        n = len(d["desc"])
+        lines.append(f"📄 Сохраню как описание: {n} симв." + (
+            f" (у мероприятия влезает до {DESC_MAX['event']}, у задачи до {DESC_MAX['task']})"
+            if n > DESC_MAX["task"] else ""))
+    if d.get("warn"):
+        lines += ["", "⚠️ " + d["warn"] + " Сохраню как есть, проверь название и время."]
     lines += [
         "",
         "📝 Задача: дело со сроком (дата и время). Напомню в срок и заранее, можно вести чек-лист и повторять напоминания.",
-        "📅 Мероприятие: событие в точное время и с местом. Предупрежу заранее, по желанию можно добавить в календарь телефона.",
+        "📅 Мероприятие: событие в точное время и с местом, у него больше места под описание. "
+        "Предупрежу заранее, по желанию можно добавить в календарь телефона.",
         "",
         "Выбери, как сохранить 👇",
     ]
@@ -686,6 +710,8 @@ async def help_cmd(m: Message):
         "♻️ Повторы: пиши «каждый понедельник в 18:00 планерка», «по будням в 8:30», «каждый месяц 5 числа» "
         "или нажми «♻️ Повторять дело» на карточке.\n\n"
         "☀️ Утренняя сводка: включается в «🔔 Напоминания», приходит раз в день.\n\n"
+        "📄 Описание: к любому делу можно добавить текст, например афишу целиком (у мероприятия до 3000 симв., "
+        "у задачи до 1000). Его можно показать и скрыть кнопкой.\n\n"
         "Как писать дату и время:\n"
         "• 2.10 (этот год, а если дата уже прошла, то следующий), 2.8.26, 2 октября, 5 числа\n"
         "• вт, пятница, завтра, через 3 д\n"
@@ -801,7 +827,24 @@ async def admin_cmd(m: Message):
         f"Подписчиков Pro: {st['pro']}\nОплат: {st['payments']} (всего {st['stars']} ⭐)\n"
         f"База данных: {storage.backend_name()}\n\n"
         "Команды:\n/grant ID [дни]: выдать Pro\n/revoke ID: забрать Pro\n/backup: прислать копию базы\n"
+        "/aitest: проверить подключение к ИИ\n"
         "Чтобы восстановить данные, пришли мне файл копии (.db).")
+
+
+@dp.message(Command("aitest"))
+async def aitest_cmd(m: Message):
+    if not admin_only(m):
+        return
+    if not GROQ_KEY:
+        await m.answer("❌ Переменная GROQ_API_KEY не задана. Добавь её на хостинге и перезапусти бота.")
+        return
+    try:
+        items = await ask_llm("Встреча с Олей завтра в 18:00 в кафе «Север»", get_tz(m.from_user.id))
+    except AIError as ex:
+        await m.answer(f"❌ ИИ не сработал: {ex}\n\nМодель: {current_model()}")
+        return
+    await m.answer(f"✅ ИИ работает. Модель: {current_model()}\n\nОтвет: "
+                   + json.dumps(items, ensure_ascii=False)[:700])
 
 
 @dp.message(Command("grant"))
@@ -938,9 +981,9 @@ async def handle_text(m: Message):
             if st.get("day"):
                 await add_on_day(m, text, st, tz)
                 return
-            info = parse_text(text, tz) if len(text) < 200 else {
-                "title": text[:200], "due": None, "day": None, "rec": None, "past": False}
-            e = create_item(uid, st["kind"], info["title"][:200], info["due"], info["day"], info["rec"], st["sec"])
+            info = analyze_long(text, tz) if len(text) >= 200 else dict(parse_text(text, tz), desc="")
+            e = create_item(uid, st["kind"], info["title"][:TITLE_MAX], info["due"], info["day"], info["rec"],
+                            st["sec"], None, None, info["desc"])
             note = "⚠️ Названная дата уже прошла, поэтому я её не учёл.\n\n" if info["past"] else ""
             resp, mk = item_response(e, tz, note + saved_title(e))
             await m.answer(resp, reply_markup=mk)
@@ -1010,6 +1053,21 @@ async def handle_text(m: Message):
                     e["nag_at"] = None
                     resp, mk = time_response(e, tz, "Повторное напоминание настроено")
                     await m.answer(resp, reply_markup=mk)
+            return
+
+        if t == "desc":
+            e = find(st["eid"], uid)
+            if e:
+                if text in ("-", "—"):
+                    e["desc"] = ""
+                    word = "Описание убрано"
+                else:
+                    cap = DESC_MAX[e["kind"]]
+                    e["desc"] = text[:cap]
+                    word = "Описание сохранено" + (f" (текст длиннее {cap} симв., сохранил начало)"
+                                                   if len(text) > cap else "")
+                resp, mk = time_response(e, tz, word)
+                await m.answer(resp, reply_markup=mk)
             return
 
         if t == "rec_n":
@@ -1105,33 +1163,42 @@ async def after_section_created(m, st, s):
 
 
 async def handle_free_text(m, text, force_ai=False):
-    """Текст без выбранного типа: показываем, что поняли, и спрашиваем «задача или мероприятие»."""
+    """Текст без выбранного типа: разбираем и спрашиваем «задача или мероприятие»."""
     uid = m.from_user.id
     tz = get_tz(uid)
     url_match = URL_RE.search(text)
-    use_ai = force_ai or url_match or len(text) >= 200
+    long_text = len(text) >= 200
+    use_ai = force_ai or url_match or long_text
 
     if not use_ai:
         info = parse_text(text, tz)
-        did = new_draft(uid, info["title"][:200], info["due"], day=info["day"], rec=info["rec"], past=info["past"])
+        did = new_draft(uid, info["title"][:TITLE_MAX], info["due"], day=info["day"], rec=info["rec"],
+                        past=info["past"])
         dtext, mk = draft_view(did, tz)
         await m.answer(dtext, reply_markup=mk)
         return
 
     await m.bot.send_chat_action(m.chat.id, "typing")
-    source = text
+    source, link, page = text, None, None
     if url_match:
-        page = await fetch_page(url_match.group(0))
+        link = url_match.group(0)
+        page = await fetch_page(link)
         if not page:
-            await m.answer("Не смог открыть ссылку. Скинь текст мероприятия сообщением, и я его разберу.")
+            await m.answer("Не смог прочитать страницу по ссылке: она закрыта, требует входа или грузится скриптами "
+                           "(так часто бывает у ВКонтакте). Скопируй текст и пришли его сообщением, я разберу.")
             return
-        comment = text.replace(url_match.group(0), "").strip()
-        source = f"{comment}\nСсылка: {url_match.group(0)}\nСтраница: {page}"
+        comment = text.replace(link, "").strip()
+        source = f"{comment}\nСсылка: {link}\nСтраница: {page}"
 
-    items = None
+    items, warn = None, ""
     if GROQ_KEY:
         if ai_allowed(uid):
-            items = await ask_llm(source, tz)
+            try:
+                items = await ask_llm(source, tz)
+            except AIError as ex:
+                logging.error("ИИ не сработал: %s", ex)
+                ai_refund(uid)
+                warn = f"ИИ не сработал: {ex}." if uid in ADMIN_IDS else "ИИ сейчас недоступен."
         else:
             ex = LimitError(f"Достигнут лимит: {limit(uid, 'ai')} {LIMIT_WORDS['ai']}. "
                             "Напиши коротко с датой, например «завтра в 18:00».", "ai", plan_of(uid))
@@ -1143,23 +1210,44 @@ async def handle_free_text(m, text, force_ai=False):
 
     drafts = []
     for it in (items or [])[:10]:
-        if it.get("title"):
-            drafts.append((str(it["title"])[:200], to_ts(it.get("datetime"), tz), it.get("place"), it.get("note"), None, None))
-    if not drafts:
-        info = parse_text(text, tz) if len(text) < 200 else {
-            "title": text[:200], "due": None, "day": None, "rec": None, "past": False}
-        drafts = [(info["title"][:200], info["due"], None, None, info["day"], info["rec"])]
+        title = str(it.get("title") or "").strip()[:TITLE_MAX]
+        if not title:
+            continue
+        due, day = ai_when(it, tz)
+        desc = str(it.get("description") or "").strip()
+        drafts.append({"title": title, "due": due, "day": day, "place": it.get("place"), "desc": desc})
+    if items is not None and not drafts and not warn:
+        warn = "ИИ не нашёл в тексте дел."
+
+    if not drafts:  # запасной вариант без ИИ: дату и время ищем сами, весь текст кладём в описание
+        if link:
+            title = (page.splitlines()[0] if page else link)[:90]
+            drafts = [{"title": title, "due": None, "day": None, "place": None,
+                       "desc": f"{link}\n\n{page}", "past": False}]
+        else:
+            a = analyze_long(text, tz) if long_text else None
+            info = a or parse_text(text, tz)
+            drafts = [{"title": info["title"][:TITLE_MAX], "due": info["due"], "day": info["day"], "place": None,
+                       "desc": a["desc"] if a else "", "past": info["past"]}]
+    elif len(drafts) == 1 and not link and long_text:
+        drafts[0]["desc"] = text  # из длинного текста человека в описание идёт он сам целиком
+    elif link:
+        for d in drafts:
+            d["desc"] = f"{link}\n\n{d['desc']}".strip()
 
     if len(drafts) == 1:
-        did = new_draft(uid, *drafts[0])
+        d = drafts[0]
+        did = new_draft(uid, d["title"], d["due"], d["place"], day=d["day"], past=d.get("past", False),
+                        desc=d["desc"], warn=warn)
         dtext, mk = draft_view(did, tz)
         await m.answer(dtext, reply_markup=mk)
         return
 
     await m.answer(f"🤖 Нашёл дел: {len(drafts)}. Сохраняю все. Тип определил сам: "
                    "со временем это мероприятие, без времени задача. Любое можно поменять кнопкой «🔄 Сменить тип» на карточке.")
-    for title, due, place, note, *_ in drafts:
-        e = add_item(uid, "event" if due else "task", title, due, place, note)
+    for d in drafts:
+        e = create_item(uid, "event" if d["due"] else "task", d["title"], d["due"], d["day"], None, 0,
+                        d["place"], None, d["desc"])
         await m.answer(saved_title(e) + "\n\n" + card(e, tz), reply_markup=kb(e))
 
 
@@ -1183,7 +1271,7 @@ async def on_cb(c: CallbackQuery):
             pass
 
 
-ITEM_CMDS = ("open", "done", "undo", "del", "kind", "mv", "mvs", "mvn", "back", "tp", "snz", "pl", "ics", "ck", "rc")
+ITEM_CMDS = ("open", "done", "undo", "del", "kind", "mv", "mvs", "mvn", "back", "tp", "snz", "pl", "ics", "ck", "rc", "dc")
 
 
 async def dispatch(c: CallbackQuery):
@@ -1477,6 +1565,7 @@ async def dispatch(c: CallbackQuery):
             e["offsets"] = list(s["ev_offsets"])
             e["repeat"] = 0
         e["sec"] = 0
+        e["desc"] = (e.get("desc") or "")[:DESC_MAX[e["kind"]]]
         reset_fired(e)
         name = "мероприятие" if e["kind"] == "event" else "задача"
         text, mk = item_response(e, tz, f"🔄 Теперь это {name}")
@@ -1527,6 +1616,28 @@ async def dispatch(c: CallbackQuery):
     elif cmd == "rc":
         await rec_cb(c, e, p[2:])
         return
+    elif cmd == "dc":
+        await desc_cb(c, e, p[2])
+        return
+    await c.answer()
+
+
+async def desc_cb(c, e, act):
+    """Описание дела: показать, скрыть, изменить, убрать."""
+    uid = c.from_user.id
+    tz = get_tz(uid)
+    msg = c.message
+    if act == "show":
+        await safe_edit(msg, card(e, tz, show_desc=True), kb(e, desc_open=True))
+    elif act == "hide":
+        await safe_edit(msg, card(e, tz), kb(e))
+    elif act == "clr":
+        e["desc"] = ""
+        await safe_edit(msg, card(e, tz), kb(e))
+    else:  # edit
+        STATE[uid] = {"type": "desc", "eid": e["id"]}
+        await msg.answer(f"📄 Пришли описание одним сообщением (до {DESC_MAX[e['kind']]} симв.). "
+                         "Можно вставить длинный текст, например афишу. Чтобы убрать описание, напиши «-».")
     await c.answer()
 
 
